@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include "audit_hook.hpp"
 #include <link.h>
 #include <string.h>
 #include <dlfcn.h>
@@ -14,6 +15,7 @@
 #include <stdio.h>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include <mutex>
 #include <shared_mutex>
 
@@ -26,7 +28,8 @@ struct internal_hook_t {
     std::string symbol_name;
     void* trampoline_ptr;
     void** original_out_ptr;
-    std::string caller_filter; // Stores the allowed caller library name
+    ah_filter_mode_t filter_mode;
+    std::vector<std::string> filter_libs;
 };
 
 // "Construct on First Use" idiom (Magic Statics).
@@ -75,21 +78,28 @@ int ah_register_hook(const char* tool_name, const char* symbol_name, void* hook_
         .symbol_name = symbol_name,
         .trampoline_ptr = hook_func,
         .original_out_ptr = original_out,
-        .caller_filter = ""
+        .filter_mode = AH_FILTER_GLOBAL,
+        .filter_libs = {}
     };
     return 0;
 }
 
-int ah_set_caller_filter(const char* tool_name, const char* symbol_name, const char* library_name) {
-    if (!symbol_name || !library_name) return -1;
+int ah_set_caller_filter(const char* tool_name, ah_filter_mode_t mode, const char** libs, size_t num_libs) {
+    if (!tool_name || !libs) return -1;
     
     std::unique_lock lock(*get_hooks_mutex());
-    auto it = get_hooks()->find(symbol_name);
-    if (it != get_hooks()->end()) {
-        it->second.caller_filter = library_name;
-        return 0;
+    
+    // Iterate through hooks and apply the filter to ones matching this tool
+    for (auto& pair : *get_hooks()) {
+        if (pair.second.tool_name == tool_name) {
+            pair.second.filter_mode = mode;
+            pair.second.filter_libs.clear();
+            for (size_t i = 0; i < num_libs; ++i) {
+                if (libs[i]) pair.second.filter_libs.push_back(libs[i]);
+            }
+        }
     }
-    return -1; // Symbol not registered yet
+    return 0;
 }
 
 void ah_thread_pause_hooks(void) { tls_hooks_paused = true; }
@@ -206,22 +216,26 @@ static uintptr_t process_symbind(const char* symname, uintptr_t original_addr, u
     auto it = get_hooks()->find(symname);
     if (it != get_hooks()->end()) {
         
-        // Check the caller filter
-        if (!it->second.caller_filter.empty()) {
-            bool allowed = false;
+        // Check the caller filter if libraries are specified and it's not global
+        if (!it->second.filter_libs.empty() && it->second.filter_mode != AH_FILTER_GLOBAL) {
+            bool found_match = false;
             std::shared_lock obj_lock(*get_objects_mutex());
-            auto obj_it = get_objects()->find(*refcook); // Look up who is calling
+            auto obj_it = get_objects()->find(*refcook); 
             
-            // Check if the calling object's name contains our filter string
-            if (obj_it != get_objects()->end() && 
-                obj_it->second.find(it->second.caller_filter) != std::string::npos) {
-                allowed = true;
+            if (obj_it != get_objects()->end()) {
+                for (const auto& lib_name : it->second.filter_libs) {
+                    if (obj_it->second.find(lib_name) != std::string::npos) {
+                        found_match = true;
+                        break;
+                    }
+                }
             }
             
-            // If it doesn't match, return the real address. The caller gets 
-            // a direct, unhooked binding to the original function.
-            if (!allowed) {
-                return original_addr;
+            // Bypass the hook if the logic dictates it
+            if (it->second.filter_mode == AH_FILTER_INCLUDE && !found_match) {
+                return original_addr; // Not in include list, bypass hook
+            } else if (it->second.filter_mode == AH_FILTER_EXCLUDE && found_match) {
+                return original_addr; // In exclude list, bypass hook
             }
         }
 

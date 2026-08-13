@@ -1,186 +1,176 @@
 /**
  * @file audit_hook.hpp
- * @brief High-performance, type-safe LD_AUDIT instrumentation API.
+ * @brief Public API for the C++20 Audit Hooks framework.
  * 
- * Combines a minimal C runtime interface for LD_AUDIT symbol bindings
- * with a C++20 variadic template frontend for zero-overhead, ABI-safe
- * trampoline generation.
+ * This header provides both the raw C ABI boundary for communicating with the
+ * LD_AUDIT backend engine, as well as a modern, zero-overhead C++20 frontend
+ * for registering compile-time trampolines and configuring caller filters.
  */
 
-#ifndef AUDIT_HOOK_HPP
-#define AUDIT_HOOK_HPP
+#pragma once
 
-#include <stddef.h>
-#include <stdbool.h>
+#include <cstddef>
+#include <concepts>
+#include <ranges>
+#include <vector>
 
-#ifdef __cplusplus
-#include <utility>
-#include <type_traits>
-
-extern "C" {
-#endif
+// -----------------------------------------------------------------------------
+// Core C ABI & Types
+// -----------------------------------------------------------------------------
 
 /**
- * @enum ah_filter_mode_t
- * @brief Defines how caller filtering is applied during la_symbind.
+ * @brief Defines the filtering behavior for a registered hook.
  */
 typedef enum {
-    AH_FILTER_GLOBAL = 0, /* Hook applies to all callers (LD_PRELOAD style) */
-    AH_FILTER_INCLUDE,    /* Hook applies ONLY to specified caller libraries */
-    AH_FILTER_EXCLUDE     /* Hook applies to all EXCEPT specified caller libraries */
+    AH_FILTER_GLOBAL = 0, /*!< Hook applies to all callers (Default) */
+    AH_FILTER_INCLUDE,    /*!< Hook applies ONLY if the caller is in the filter list */
+    AH_FILTER_EXCLUDE     /*!< Hook applies UNLESS the caller is in the filter list */
 } ah_filter_mode_t;
 
+extern "C" {
+    /**
+     * @brief Raw ABI for registering a hook with the LD_AUDIT backend.
+     * @param tool_name The name of the tool registering the hook.
+     * @param symbol_name The symbol to intercept.
+     * @param hook_func Pointer to the trampoline/wrapper function.
+     * @param original_out Pointer to where the original function address should be stored.
+     * @return 0 on success, -1 on failure.
+     */
+    int ah_register_hook(const char* tool_name, const char* symbol_name, void* hook_func, void** original_out);
+    
+    /**
+     * @brief Raw ABI for setting a caller-based filter on a specific hook.
+     * @param tool_name The name of the tool that owns the hook.
+     * @param mode The filtering mode (Global, Include, Exclude).
+     * @param libs Array of C-strings representing library names to filter.
+     * @param num_libs The number of libraries in the array.
+     * @return 0 on success, -1 on failure.
+     */
+    int ah_set_caller_filter(const char* tool_name, ah_filter_mode_t mode, const char** libs, size_t num_libs);
+    
+    /**
+     * @brief Manually pause hook interception for the current thread.
+     */
+    void ah_thread_pause_hooks(void);
+
+    /**
+     * @brief Manually resume hook interception for the current thread.
+     */
+    void ah_thread_resume_hooks(void);
+
+    /**
+     * @brief Permanently ignore hook interception for the current thread.
+     */
+    void ah_thread_ignore_hooks(void);
+
+    /**
+     * @brief Check if hooks are currently paused or ignored for the current thread.
+     * @return true if hooks are bypassed, false otherwise.
+     */
+    bool ah_are_hooks_paused(void);
+}
+
+// -----------------------------------------------------------------------------
+// Modern C++20 Frontend API
+// -----------------------------------------------------------------------------
+
 /**
- * @brief Registers a hook with the LD_AUDIT engine.
+ * @brief Sets a caller filter for a registered hook using any iterable C++20 range.
  * 
- * @param tool_name Identifier for the tool registering the hook.
- * @param symbol_name Name of the target symbol (e.g., "malloc").
- * @param hook_func Address of the wrapper/trampoline or replacement function.
- * @param original_out OUT: Pointer address where la_symbind will write 
- *                     the resolved real function pointer during dynamic binding.
- * @return 0 on success, non-zero on error.
+ * This concept-constrained template overload allows you to pass any iterable 
+ * collection (e.g., std::vector, std::array, std::span) of strings or char pointers.
+ * It automatically translates the range into the contiguous C-array required by the ABI.
+ * 
+ * @tparam Range Any std::ranges::forward_range whose elements convert to const char*.
+ * @param tool_name The name of the tool that owns the hook.
+ * @param mode The filtering mode (AH_FILTER_INCLUDE or AH_FILTER_EXCLUDE).
+ * @param libs The iterable range of library names.
+ * @return 0 on success, -1 on failure.
  */
-int ah_register_hook(const char* tool_name, 
-                     const char* symbol_name, 
-                     void* hook_func, 
-                     void** original_out);
-
-/**
- * @brief Restricts which calling libraries trigger hooks using la_symbind's refcook.
- */
-int ah_set_caller_filter(const char* tool_name, 
-                         ah_filter_mode_t mode, 
-                         const char** object_names, 
-                         size_t count);
-
-/**
- * @brief Pauses hook execution for the current thread (TLS state flag).
- */
-void ah_thread_pause_hooks(void);
-
-/**
- * @brief Resumes hook execution for the current thread (TLS state flag).
- */
-void ah_thread_resume_hooks(void);
-
-/**
- * @brief Permanently ignores all hooks for the calling thread (useful for background workers).
- */
-void ah_thread_ignore_hooks(void);
-
-/**
- * @brief Fast inline query to check if hooks are currently paused on this thread.
- */
-bool ah_are_hooks_paused(void);
-
-#ifdef __cplusplus
-} // extern "C"
+template <std::ranges::forward_range Range>
+requires std::convertible_to<std::ranges::range_value_t<Range>, const char*>
+inline int ah_set_caller_filter(const char* tool_name, ah_filter_mode_t mode, const Range& libs) {
+    std::vector<const char*> contiguous_libs;
+    
+    // Optimization: If the range knows its size at compile/runtime, pre-allocate
+    if constexpr (std::ranges::sized_range<Range>) {
+        contiguous_libs.reserve(std::ranges::size(libs));
+    }
+    
+    for (const auto& lib : libs) {
+        contiguous_libs.push_back(lib);
+    }
+    
+    // Route down to the C ABI
+    return ah_set_caller_filter(tool_name, mode, contiguous_libs.data(), contiguous_libs.size());
+}
 
 namespace audit_hooks {
 
-/**
- * @brief RAII Guard for thread-local hook pausing.
- */
-class [[nodiscard]] ScopedPause {
-public:
-    ScopedPause() noexcept { ah_thread_pause_hooks(); }
-    ~ScopedPause() noexcept { ah_thread_resume_hooks(); }
-
-    ScopedPause(const ScopedPause&) = delete;
-    ScopedPause& operator=(const ScopedPause&) = delete;
-    ScopedPause(ScopedPause&&) = delete;
-    ScopedPause& operator=(ScopedPause&&) = delete;
-};
-
 namespace detail {
-
-// Helper template to generate compile-time trampolines for any C/C++ function signature.
-template <typename FuncSig, auto WrapperFunc, auto OriginalFuncPtr>
-struct HookGenerator;
-
-template <typename Ret, typename... Args, auto WrapperFunc, auto OriginalFuncPtr>
-struct HookGenerator<Ret(*)(Args...), WrapperFunc, OriginalFuncPtr> {
-
     /**
-     * @brief C-compatible static trampoline instantiated per unique hook signature.
-     * 
-     * The C++ compiler generates the exact CPU calling convention prologue/epilogue
-     * and register management for (Args...) -> Ret automatically.
+     * @brief Internal trampoline generator to manage re-entrancy automatically.
      */
-    static Ret Trampoline(Args... args) {
-        // 1. Re-entrancy check: If this thread is paused, bypass straight to the real function.
-        if (ah_are_hooks_paused()) {
-            return (*OriginalFuncPtr)(std::forward<Args>(args)...);
+    template <typename Signature, auto HookFunc, auto OriginalPtr>
+    struct HookGenerator;
+
+    template <typename Ret, typename... Args, auto HookFunc, auto OriginalPtr>
+    struct HookGenerator<Ret(*)(Args...), HookFunc, OriginalPtr> {
+        static Ret Trampoline(Args... args) {
+            // Auto-pause hooks to prevent re-entrancy loops when the wrapper executes
+            bool was_paused = ah_are_hooks_paused();
+            if (!was_paused) ah_thread_pause_hooks();
+            
+            if constexpr (std::is_void_v<Ret>) {
+                HookFunc(args...);
+                if (!was_paused) ah_thread_resume_hooks();
+            } else {
+                Ret ret = HookFunc(args...);
+                if (!was_paused) ah_thread_resume_hooks();
+                return ret;
+            }
         }
-
-        // 2. Auto-pause hooks before entering user wrapper to prevent infinite recursion
-        //    from inside the wrapper or standard library calls.
-        ah_thread_pause_hooks();
-
-        // 3. Perfect forwarding to user wrapper with void / non-void handling
-        if constexpr (std::is_void_v<Ret>) {
-            WrapperFunc(std::forward<Args>(args)...);
-            ah_thread_resume_hooks();
-        } else {
-            decltype(auto) result = WrapperFunc(std::forward<Args>(args)...);
-            ah_thread_resume_hooks();
-            return result;
-        }
-    }
-};
-
+    };
 } // namespace detail
 
 /**
- * @brief Wraps a target symbol using a C++20 compile-time generated trampoline.
+ * @brief Replaces a function entirely (zero overhead).
  * 
- * Automatically handles argument forwarding, calling conventions, and TLS 
- * re-entrancy prevention.
+ * Use this when you want to completely overwrite a target function and do not 
+ * need to call the original underlying logic. This bypasses the auto-pausing 
+ * trampoline completely for maximum performance.
  * 
- * @tparam WrapperFunc Pointer to your wrapper function.
- * @tparam OriginalFuncPtr Pointer to the global function pointer storing the real address.
- * @param tool_name Identifier for your tool.
- * @param symbol_name Symbol to intercept (e.g., "malloc", "open").
- * @return 0 on success, non-zero on failure.
+ * @tparam HookFunc The C++ replacement function.
+ * @param tool_name The namespace/name of your tool.
+ * @param symbol_name The exact ELF symbol name to replace.
+ * @return 0 on success, -1 on failure.
  */
-template <auto WrapperFunc, auto OriginalFuncPtr>
-inline int register_wrap(const char* tool_name, const char* symbol_name) {
-    using FuncType = std::remove_pointer_t<decltype(WrapperFunc)>;
-    
-    static_assert(std::is_function_v<FuncType>, 
-        "WrapperFunc must be a valid function pointer.");
-
-    using Generator = detail::HookGenerator<decltype(WrapperFunc), WrapperFunc, OriginalFuncPtr>;
-    
-    return ah_register_hook(
-        tool_name,
-        symbol_name,
-        reinterpret_cast<void*>(&Generator::Trampoline),
-        reinterpret_cast<void**>(OriginalFuncPtr)
-    );
+template <auto HookFunc>
+inline int register_replace(const char* tool_name, const char* symbol_name) {
+    // For pure replacement, we bypass the auto-pausing trampoline completely.
+    return ah_register_hook(tool_name, symbol_name, reinterpret_cast<void*>(HookFunc), nullptr);
 }
 
 /**
- * @brief Completely replaces a target symbol without trampoline overhead or TLS state tracking.
+ * @brief Wraps a function, automatically managing re-entrancy.
  * 
- * @tparam ReplacementFunc Pointer to the replacement function.
- * @param tool_name Identifier for your tool.
- * @param symbol_name Symbol to intercept.
- * @param original_out Optional OUT pointer to receive the original function address.
- * @return 0 on success, non-zero on failure.
+ * Use this when you want to intercept a target function, execute your own logic, 
+ * and optionally call the original underlying function pointer. This automatically 
+ * handles pausing thread-local hooks to prevent infinite recursion.
+ * 
+ * @tparam HookFunc The C++ wrapper function.
+ * @tparam OriginalPtr A pointer to the variable where the real function address will be stored.
+ * @param tool_name The namespace/name of your tool.
+ * @param symbol_name The exact ELF symbol name to wrap.
+ * @return 0 on success, -1 on failure.
  */
-template <auto ReplacementFunc>
-inline int register_replace(const char* tool_name, const char* symbol_name, void** original_out = nullptr) {
-    return ah_register_hook(
-        tool_name,
-        symbol_name,
-        reinterpret_cast<void*>(ReplacementFunc),
-        original_out
-    );
+template <auto HookFunc, auto OriginalPtr>
+inline int register_wrap(const char* tool_name, const char* symbol_name) {
+    using FuncType = decltype(HookFunc);
+    void* trampoline = reinterpret_cast<void*>(&detail::HookGenerator<FuncType, HookFunc, OriginalPtr>::Trampoline);
+    void** orig_out = reinterpret_cast<void**>(OriginalPtr);
+    
+    return ah_register_hook(tool_name, symbol_name, trampoline, orig_out);
 }
 
 } // namespace audit_hooks
-
-#endif // __cplusplus
-
-#endif // AUDIT_HOOK_HPP
