@@ -63,3 +63,31 @@ libtest_filter_plugin_la_LDFLAGS = $(PLUGIN_LIBS)
 
 # Add run_filter.sh to the existing TESTS array
 TESTS += run_filter.sh
+
+# --- Composition Test ---
+check_PROGRAMS += app_comp
+check_LTLIBRARIES += libcomp.la libtest_comp_plugin.la
+
+app_comp_SOURCES = app_comp.c
+app_comp_LDADD = libcomp.la
+
+libcomp_la_SOURCES = libcomp.c
+libcomp_la_LDFLAGS = -shared -avoid-version -rpath $(abs_builddir)
+
+libtest_comp_plugin_la_SOURCES = test_comp_plugin.cpp
+libtest_comp_plugin_la_CXXFLAGS = $(PLUGIN_FLAGS)
+libtest_comp_plugin_la_LDFLAGS = $(PLUGIN_LIBS)
+
+TESTS += run_comp.sh
+
+# --- Filter State Test ---
+check_PROGRAMS += app_filter_state
+check_LTLIBRARIES += libtest_filter_state_plugin.la
+
+app_filter_state_SOURCES = app_filter_state.c
+
+libtest_filter_state_plugin_la_SOURCES = test_filter_state_plugin.cpp
+libtest_filter_state_plugin_la_CXXFLAGS = $(PLUGIN_FLAGS)
+libtest_filter_state_plugin_la_LDFLAGS = $(PLUGIN_LIBS)
+
+TESTS += run_filter_state.sh

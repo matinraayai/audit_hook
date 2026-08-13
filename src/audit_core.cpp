@@ -18,6 +18,7 @@
 #include <vector>
 #include <mutex>
 #include <shared_mutex>
+#include <algorithm> // Required for std::find
 
 // -----------------------------------------------------------------------------
 // State Management & Dynamic Data Structures
@@ -73,14 +74,63 @@ int ah_register_hook(const char* tool_name, const char* symbol_name, void* hook_
     if (!tool_name || !symbol_name || !hook_func) return -1;
 
     std::unique_lock lock(*get_hooks_mutex());
-    (*get_hooks())[symbol_name] = {
-        .tool_name = tool_name,
-        .symbol_name = symbol_name,
-        .trampoline_ptr = hook_func,
-        .original_out_ptr = original_out,
-        .filter_mode = AH_FILTER_GLOBAL,
-        .filter_libs = {}
-    };
+    auto& hooks = *get_hooks();
+    auto it = hooks.find(symbol_name);
+
+    if (it != hooks.end()) {
+        bool is_new_replace = (original_out == nullptr);
+        bool is_old_replace = (it->second.original_out_ptr == nullptr);
+
+        if (is_new_replace && !is_old_replace) {
+            // RULE 1: Wrap followed by Replace
+            // The wrapping is discarded and a warning is emitted.
+            fprintf(stderr, "[AuditCore] WARNING: Symbol '%s' was wrapped by '%s', but is now being entirely replaced by '%s'. The previous wrapping is discarded.\n", 
+                    symbol_name, it->second.tool_name.c_str(), tool_name);
+            
+            it->second.tool_name = tool_name;
+            it->second.trampoline_ptr = hook_func;
+            it->second.original_out_ptr = nullptr;
+            
+            // Reset filters for the new replacement
+            it->second.filter_mode = AH_FILTER_GLOBAL;
+            it->second.filter_libs.clear();
+        } 
+        else if (!is_new_replace) {
+            // RULES 2 & 3: Replace followed by Wrap, OR Wrap followed by Wrap
+            
+            // Chain them: The new wrapper's "original" pointer gets the address 
+            // of the currently active trampoline.
+            *original_out = it->second.trampoline_ptr;
+            
+            // Update the active trampoline to the new wrapper
+            it->second.tool_name = tool_name;
+            it->second.trampoline_ptr = hook_func;
+        }
+        else {
+            // RULE 4: Replace followed by Replace
+            // Overwrite the old replace with the new one and emit a warning.
+            fprintf(stderr, "[AuditCore] WARNING: Symbol '%s' was already replaced by '%s', but is now being replaced again by '%s'. The previous replacement is discarded.\n", 
+                    symbol_name, it->second.tool_name.c_str(), tool_name);
+            
+            it->second.tool_name = tool_name;
+            it->second.trampoline_ptr = hook_func;
+            it->second.original_out_ptr = nullptr;
+
+            // Reset filters for the new replacement
+            it->second.filter_mode = AH_FILTER_GLOBAL;
+            it->second.filter_libs.clear();
+        }
+    } else {
+        // First time this symbol is hooked
+        hooks[symbol_name] = {
+            .tool_name = tool_name,
+            .symbol_name = symbol_name,
+            .trampoline_ptr = hook_func,
+            .original_out_ptr = original_out,
+            .filter_mode = AH_FILTER_GLOBAL,
+            .filter_libs = {}
+        };
+    }
     return 0;
 }
 
@@ -92,10 +142,77 @@ int ah_set_caller_filter(const char* tool_name, ah_filter_mode_t mode, const cha
     // Iterate through hooks and apply the filter to ones matching this tool
     for (auto& pair : *get_hooks()) {
         if (pair.second.tool_name == tool_name) {
-            pair.second.filter_mode = mode;
-            pair.second.filter_libs.clear();
-            for (size_t i = 0; i < num_libs; ++i) {
-                if (libs[i]) pair.second.filter_libs.push_back(libs[i]);
+            auto& hook = pair.second;
+            
+            if (mode == AH_FILTER_INCLUDE) {
+                if (hook.filter_mode == AH_FILTER_EXCLUDE) {
+                    // Rule: Exclude followed by Include (Inverted Set Difference)
+                    // We remove the newly "included" libraries from the existing "exclude" list.
+                    for (size_t i = 0; i < num_libs; ++i) {
+                        if (libs[i]) {
+                            std::string target = libs[i];
+                            auto it = std::find(hook.filter_libs.begin(), hook.filter_libs.end(), target);
+                            
+                            if (it != hook.filter_libs.end()) {
+                                hook.filter_libs.erase(it);
+                            } else {
+                                // Symmetrical warning: attempting to include a library not currently excluded
+                                fprintf(stderr, "[AuditCore] WARNING: Tool '%s' attempted to include library '%s' on symbol '%s', but it was not in the active EXCLUDE list.\n",
+                                        tool_name, target.c_str(), hook.symbol_name.c_str());
+                            }
+                        }
+                    }
+                } 
+                else {
+                    if (hook.filter_mode == AH_FILTER_GLOBAL) {
+                        // Rule: Global followed by Include
+                        hook.filter_mode = AH_FILTER_INCLUDE;
+                        hook.filter_libs.clear();
+                    }
+                    
+                    // Rule: Append new libraries, silently ignoring duplicates
+                    for (size_t i = 0; i < num_libs; ++i) {
+                        if (libs[i]) {
+                            std::string new_lib = libs[i];
+                            if (std::find(hook.filter_libs.begin(), hook.filter_libs.end(), new_lib) == hook.filter_libs.end()) {
+                                hook.filter_libs.push_back(new_lib);
+                            }
+                        }
+                    }
+                }
+            } 
+            else if (mode == AH_FILTER_EXCLUDE) {
+                if (hook.filter_mode == AH_FILTER_GLOBAL || hook.filter_mode == AH_FILTER_EXCLUDE) {
+                    // Rule: Global followed by Exclude, OR Exclude followed by Exclude
+                    hook.filter_mode = AH_FILTER_EXCLUDE;
+                    
+                    // Append new exclusions, silently ignoring duplicates
+                    for (size_t i = 0; i < num_libs; ++i) {
+                        if (libs[i]) {
+                            std::string new_lib = libs[i];
+                            if (std::find(hook.filter_libs.begin(), hook.filter_libs.end(), new_lib) == hook.filter_libs.end()) {
+                                hook.filter_libs.push_back(new_lib);
+                            }
+                        }
+                    }
+                } 
+                else if (hook.filter_mode == AH_FILTER_INCLUDE) {
+                    // Rule: Include followed by Exclude (Set Difference)
+                    for (size_t i = 0; i < num_libs; ++i) {
+                        if (libs[i]) {
+                            std::string target = libs[i];
+                            auto it = std::find(hook.filter_libs.begin(), hook.filter_libs.end(), target);
+                            
+                            if (it != hook.filter_libs.end()) {
+                                hook.filter_libs.erase(it);
+                            } else {
+                                // Rule: Warn if excluded library is not in the active Include list
+                                fprintf(stderr, "[AuditCore] WARNING: Tool '%s' attempted to exclude library '%s' on symbol '%s', but it was not in the active INCLUDE list.\n",
+                                        tool_name, target.c_str(), hook.symbol_name.c_str());
+                            }
+                        }
+                    }
+                }
             }
         }
     }
