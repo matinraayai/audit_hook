@@ -26,6 +26,7 @@ struct internal_hook_t {
     std::string symbol_name;
     void* trampoline_ptr;
     void** original_out_ptr;
+    std::string caller_filter; // Stores the allowed caller library name
 };
 
 // "Construct on First Use" idiom (Magic Statics).
@@ -73,9 +74,22 @@ int ah_register_hook(const char* tool_name, const char* symbol_name, void* hook_
         .tool_name = tool_name,
         .symbol_name = symbol_name,
         .trampoline_ptr = hook_func,
-        .original_out_ptr = original_out
+        .original_out_ptr = original_out,
+        .caller_filter = ""
     };
     return 0;
+}
+
+int ah_set_caller_filter(const char* tool_name, const char* symbol_name, const char* library_name) {
+    if (!symbol_name || !library_name) return -1;
+    
+    std::unique_lock lock(*get_hooks_mutex());
+    auto it = get_hooks()->find(symbol_name);
+    if (it != get_hooks()->end()) {
+        it->second.caller_filter = library_name;
+        return 0;
+    }
+    return -1; // Symbol not registered yet
 }
 
 void ah_thread_pause_hooks(void) { tls_hooks_paused = true; }
@@ -91,9 +105,10 @@ bool ah_are_hooks_paused(void) {
 // -----------------------------------------------------------------------------
 // Internal Interceptors
 // -----------------------------------------------------------------------------
+
 extern "C" void* audit_dlsym_wrapper(void* handle, const char* symbol) {
-    // CRITICAL FIX 1: If hooks are already paused (e.g., from inside a wrapper), 
-    // bypass interception completely and return the REAL address, not the trampoline!
+    // If hooks are already paused, bypass interception completely and 
+    // return the REAL address, not the trampoline.
     if (tls_hooks_paused || tls_hooks_ignored) {
         return real_dlsym ? real_dlsym(handle, symbol) : nullptr;
     }
@@ -107,7 +122,6 @@ extern "C" void* audit_dlsym_wrapper(void* handle, const char* symbol) {
             // If we haven't populated the original pointer for the wrapper yet,
             // we must do it now using the real dlsym.
             if (it->second.original_out_ptr != nullptr && *(it->second.original_out_ptr) == nullptr) {
-                
                 // Pause hooks while we call real dlsym. This prevents la_symbind 
                 // from intercepting this internal lookup and returning a trampoline.
                 tls_hooks_paused = true;
@@ -115,7 +129,7 @@ extern "C" void* audit_dlsym_wrapper(void* handle, const char* symbol) {
                 tls_hooks_paused = false;
             }
             
-            // Return the C++ trampoline to the application
+            // Return the C++ trampoline
             return it->second.trampoline_ptr;
         }
     }
@@ -128,7 +142,6 @@ extern "C" void* audit_dlsym_wrapper(void* handle, const char* symbol) {
     return nullptr;
 }
 
-
 // -----------------------------------------------------------------------------
 // LD_AUDIT Linker Callbacks
 // -----------------------------------------------------------------------------
@@ -140,7 +153,7 @@ extern "C" {
  */
 unsigned int la_version(unsigned int version) {
     if (version == 0) return 0;
-    // CRITICAL FIX: Do not call dlopen here! The linker's global scope array 
+    // Do not call dlopen here! The linker's global scope array 
     // is not yet ready to be resized. Wait for la_preinit.
     return LAV_CURRENT;
 }
@@ -152,6 +165,8 @@ unsigned int la_version(unsigned int version) {
 void la_preinit(uintptr_t *cookie) {
     const char* plugin_path = getenv("AH_PLUGIN");
     if (plugin_path) {
+        // Use RTLD_LOCAL instead of RTLD_GLOBAL to avoid triggering a 
+        // glibc bug inside the LM_ID_NEWLM namespace during initialization.
         void* handle = dlopen(plugin_path, RTLD_NOW | RTLD_LOCAL);
         if (!handle) {
             fprintf(stderr, "[AuditCore] FATAL: Failed to load plugin '%s'\n", plugin_path);
@@ -174,18 +189,15 @@ unsigned int la_objclose(uintptr_t* cookie) {
     return 0;
 }
 
-// (Inside the LD_AUDIT Linker Callbacks section)
-
-static uintptr_t process_symbind(const char* symname, uintptr_t original_addr, unsigned int* flags) {
+static uintptr_t process_symbind(const char* symname, uintptr_t original_addr, unsigned int* flags, uintptr_t* refcook) {
     if (strcmp(symname, "dlsym") == 0) {
         real_dlsym = reinterpret_cast<void*(*)(void*, const char*)>(original_addr);
         *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
         return reinterpret_cast<uintptr_t>(&audit_dlsym_wrapper);
     }
 
-    // CRITICAL FIX 2: If hooks are paused, bypass completely! 
-    // This stops dlsym's internal la_symbind trigger from replacing our 
-    // internal lookups with a trampoline.
+    // If hooks are paused, bypass completely. This stops dlsym's internal 
+    // la_symbind trigger from replacing our internal lookups with a trampoline.
     if (tls_hooks_paused || tls_hooks_ignored) {
         return original_addr;
     }
@@ -193,6 +205,26 @@ static uintptr_t process_symbind(const char* symname, uintptr_t original_addr, u
     std::shared_lock lock(*get_hooks_mutex());
     auto it = get_hooks()->find(symname);
     if (it != get_hooks()->end()) {
+        
+        // Check the caller filter
+        if (!it->second.caller_filter.empty()) {
+            bool allowed = false;
+            std::shared_lock obj_lock(*get_objects_mutex());
+            auto obj_it = get_objects()->find(*refcook); // Look up who is calling
+            
+            // Check if the calling object's name contains our filter string
+            if (obj_it != get_objects()->end() && 
+                obj_it->second.find(it->second.caller_filter) != std::string::npos) {
+                allowed = true;
+            }
+            
+            // If it doesn't match, return the real address. The caller gets 
+            // a direct, unhooked binding to the original function.
+            if (!allowed) {
+                return original_addr;
+            }
+        }
+
         if (it->second.original_out_ptr) {
             *(it->second.original_out_ptr) = reinterpret_cast<void*>(original_addr);
         }
@@ -206,13 +238,13 @@ static uintptr_t process_symbind(const char* symname, uintptr_t original_addr, u
 uintptr_t la_symbind64(Elf64_Sym* sym, unsigned int ndx,
                        uintptr_t* refcook, uintptr_t* defcook,
                        unsigned int* flags, const char* symname) {
-    return process_symbind(symname, sym->st_value, flags);
+    return process_symbind(symname, sym->st_value, flags, refcook);
 }
 
 uintptr_t la_symbind32(Elf32_Sym* sym, unsigned int ndx,
                        uintptr_t* refcook, uintptr_t* defcook,
                        unsigned int* flags, const char* symname) {
-    return process_symbind(symname, sym->st_value, flags);
+    return process_symbind(symname, sym->st_value, flags, refcook);
 }
 
 } // extern "C"

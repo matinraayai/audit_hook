@@ -43,3 +43,23 @@ libtest_dlopen_plugin_la_LDFLAGS = $(PLUGIN_LIBS)
 
 # Test execution scripts
 TESTS = run_replace.sh run_wrap.sh run_dlsym.sh run_dlopen.sh
+
+# Add to existing check_PROGRAMS and check_LTLIBRARIES
+check_PROGRAMS += app_filter
+check_LTLIBRARIES += libnum3.la libtest_filter_plugin.la
+
+# Target App
+app_filter_SOURCES = app_filter.c
+app_filter_LDADD = libnum3.la
+
+# Target Library
+libnum3_la_SOURCES = libnum3.c
+libnum3_la_LDFLAGS = -shared -avoid-version -rpath $(abs_builddir)
+
+# Test Plugin
+libtest_filter_plugin_la_SOURCES = test_filter_plugin.cpp
+libtest_filter_plugin_la_CXXFLAGS = $(PLUGIN_FLAGS)
+libtest_filter_plugin_la_LDFLAGS = $(PLUGIN_LIBS)
+
+# Add run_filter.sh to the existing TESTS array
+TESTS += run_filter.sh

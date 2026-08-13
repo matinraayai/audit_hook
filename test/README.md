@@ -30,6 +30,11 @@ Because `LD_AUDIT` libraries operate very early in the process lifecycle and wit
 *   **Description:** Validates that functions loaded late into the process via `dlopen` are successfully hooked, and that `RTLD_DEFAULT` lookups return the wrapped functions. 
 *   **Attribution:** This test case and its associated libraries (`libnum.c`, `libnum2.c`, `app_dlopen.c`) were derived directly from LLNL's GOTCHA framework test suite, specifically: [https://github.com/llnl/GOTCHA/test/dlopen](https://github.com/llnl/GOTCHA/test/dlopen).
 
+#### 5. Caller-based Filtering (`run_filter.sh`)
+*   **Plugin:** `test_filter_plugin.cpp`
+*   **Description:** Validates that plugins can dynamically filter their own execution based on the identity of the calling library (emulating GOTCHA's `gotcha_filter_libraries_by_name`). It uses `dladdr` and `__builtin_return_address(1)` inside the C++ wrapper to bypass hooks if the call did not originate from the allowed shared object.
+*   **Attribution:** This test case and its associated logic were derived from LLNL's GOTCHA framework test suite, specifically: [https://github.com/llnl/GOTCHA/tree/develop/test/filter](https://github.com/llnl/GOTCHA/tree/develop/test/filter).
+
 ## Running the Tests
 
 To compile and execute the test suite, run the following from the root directory:
