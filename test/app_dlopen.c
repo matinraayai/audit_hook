@@ -56,9 +56,11 @@ int main() {
         had_error = -1;
     }
 
+    /* REVERTED FIX: test_return_five is NOT hooked and was loaded RTLD_LOCAL. 
+       It must correctly return NULL when queried via RTLD_DEFAULT. */
     test_retfive = (int (*)(void))dlsym(RTLD_DEFAULT, "test_return_five");
-    if (test_retfive == NULL || test_retfive() != 5) {
-        fprintf(stderr, "ERROR: call to test_return_five in RTLD_DEFAULT failed\n");
+    if (test_retfive != NULL) {
+        fprintf(stderr, "ERROR: call to test_return_five should NOT be found in RTLD_DEFAULT\n");
         had_error = -1;
     }
 
