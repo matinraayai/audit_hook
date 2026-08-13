@@ -31,6 +31,15 @@ struct internal_hook_t {
   void **original_out_ptr;
   ah_filter_mode_t filter_mode;
   std::vector<std::string> filter_libs;
+  // Wrapper trampolines from outermost to innermost. Empty if and only if the
+  // active hook is a replace (replaced-only). When non-empty, front() is the
+  // same pointer as trampoline_ptr.
+  std::vector<void *> wrapper_chain;
+  // The callable beneath the wrappers: the real OS function for a pure wrap
+  // chain (resolved lazily at first bind), or the wrapped replace trampoline
+  // for a replace->wrap chain. nullptr for replaced-only hooks or before the
+  // first lazy resolution.
+  void *underlying;
 };
 
 // "Construct on First Use" idiom (Magic Statics).
@@ -95,6 +104,8 @@ int ah_register_hook(const char *tool_name, const char *symbol_name,
       it->second.tool_name = tool_name;
       it->second.trampoline_ptr = hook_func;
       it->second.original_out_ptr = nullptr;
+      it->second.wrapper_chain.clear();
+      it->second.underlying = nullptr;
 
       // Reset filters for the new replacement
       it->second.filter_mode = AH_FILTER_GLOBAL;
@@ -105,6 +116,17 @@ int ah_register_hook(const char *tool_name, const char *symbol_name,
       // Chain them: The new wrapper's "original" pointer gets the address
       // of the currently active trampoline.
       *original_out = it->second.trampoline_ptr;
+
+      // Record the chain from outermost to innermost so it can be traversed.
+      // Wrapping a replace: the replace becomes the underlying callable.
+      // Wrapping a wrapper: prepend the new wrapper to the recorded chain.
+      if (it->second.wrapper_chain.empty()) {
+        it->second.underlying = it->second.trampoline_ptr;
+        it->second.wrapper_chain.push_back(hook_func);
+      } else {
+        it->second.wrapper_chain.insert(it->second.wrapper_chain.begin(),
+                                        hook_func);
+      }
 
       // Update the active trampoline to the new wrapper
       it->second.tool_name = tool_name;
@@ -121,6 +143,8 @@ int ah_register_hook(const char *tool_name, const char *symbol_name,
       it->second.tool_name = tool_name;
       it->second.trampoline_ptr = hook_func;
       it->second.original_out_ptr = nullptr;
+      it->second.wrapper_chain.clear();
+      it->second.underlying = nullptr;
 
       // Reset filters for the new replacement
       it->second.filter_mode = AH_FILTER_GLOBAL;
@@ -133,7 +157,11 @@ int ah_register_hook(const char *tool_name, const char *symbol_name,
                           .trampoline_ptr = hook_func,
                           .original_out_ptr = original_out,
                           .filter_mode = AH_FILTER_GLOBAL,
-                          .filter_libs = {}};
+                          .filter_libs = {},
+                          .wrapper_chain = original_out
+                                               ? std::vector<void *>{hook_func}
+                                               : std::vector<void *>{},
+                          .underlying = nullptr};
   }
   return 0;
 }
@@ -268,7 +296,9 @@ extern "C" void *audit_dlsym_wrapper(void *handle, const char *symbol) {
         // Pause hooks while we call real dlsym. This prevents la_symbind
         // from intercepting this internal lookup and returning a trampoline.
         tls_hooks_paused = true;
-        *(it->second.original_out_ptr) = real_dlsym(handle, symbol);
+        void *real_func = real_dlsym(handle, symbol);
+        *(it->second.original_out_ptr) = real_func;
+        it->second.underlying = real_func;
         tls_hooks_paused = false;
       }
 
@@ -394,6 +424,7 @@ static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
 
     if (it->second.original_out_ptr) {
       *(it->second.original_out_ptr) = reinterpret_cast<void *>(original_addr);
+      it->second.underlying = reinterpret_cast<void *>(original_addr);
     }
     *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
     return reinterpret_cast<uintptr_t>(it->second.trampoline_ptr);
