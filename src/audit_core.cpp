@@ -170,17 +170,32 @@ unsigned int la_version(unsigned int version) {
 
 /**
  * @brief Invoked after all objects are loaded, right before the app runs.
- * This is the ONLY safe place to dlopen our plugin!
+ * This is the ONLY safe place to dlopen our plugins!
  */
 void la_preinit(uintptr_t *cookie) {
-    const char* plugin_path = getenv("AH_PLUGIN");
-    if (plugin_path) {
-        // Use RTLD_LOCAL instead of RTLD_GLOBAL to avoid triggering a 
-        // glibc bug inside the LM_ID_NEWLM namespace during initialization.
-        void* handle = dlopen(plugin_path, RTLD_NOW | RTLD_LOCAL);
-        if (!handle) {
-            fprintf(stderr, "[AuditCore] FATAL: Failed to load plugin '%s'\n", plugin_path);
-            fprintf(stderr, "[AuditCore] Error: %s\n", dlerror());
+    const char* plugins_env = getenv("AH_PLUGINS");
+    if (plugins_env) {
+        // Duplicate the environment string so we can safely tokenize it
+        char* env_copy = strdup(plugins_env);
+        if (env_copy) {
+            char* saveptr = nullptr;
+            // Tokenize by colon ':'
+            char* plugin_path = strtok_r(env_copy, ":", &saveptr);
+            
+            while (plugin_path != nullptr) {
+                // Use RTLD_LOCAL instead of RTLD_GLOBAL to avoid triggering a 
+                // glibc bug inside the LM_ID_NEWLM namespace during initialization.
+                void* handle = dlopen(plugin_path, RTLD_NOW | RTLD_LOCAL);
+                
+                if (!handle) {
+                    fprintf(stderr, "[AuditCore] FATAL: Failed to load plugin '%s'\n", plugin_path);
+                    fprintf(stderr, "[AuditCore] Error: %s\n", dlerror());
+                }
+                
+                // Get the next plugin path in the list
+                plugin_path = strtok_r(nullptr, ":", &saveptr);
+            }
+            free(env_copy);
         }
     }
 }

@@ -8,7 +8,7 @@ ls -l $PLUGIN || echo "MISSING PLUGIN!"
 
 echo "=== [Diagnostics] Running App ==="
 # Inject the variables inline ONLY into app_simple!
-OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGIN="$PLUGIN" ./app_simple 2>&1)
+OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="$PLUGIN" ./app_simple 2>&1)
 EXIT_CODE=$?
 
 echo "=== [Diagnostics] Output ==="

@@ -3,7 +3,7 @@ CORE="../src/.libs/libaudit_core.so"
 PLUGIN="./.libs/libtest_dlsym_plugin.so"
 
 echo "=== [Diagnostics] Running App ==="
-OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGIN="$PLUGIN" ./app_dlsym 2>&1)
+OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="$PLUGIN" ./app_dlsym 2>&1)
 EXIT_CODE=$?
 
 echo "=== [Diagnostics] Output ==="
