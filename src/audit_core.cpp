@@ -58,8 +58,8 @@ static std::shared_mutex *get_objects_mutex() {
 static thread_local bool tls_hooks_paused = false;
 static thread_local bool tls_hooks_ignored = false;
 static thread_local std::vector<void *> tls_caller_stack;
-
-static void *(*real_dlsym)(void *, const char *) = nullptr;
+static thread_local std::vector<void **> tls_active_orig_ptrs;
+static thread_local std::string tls_last_resolved_caller;
 
 static bool is_action_allowed(const hook_action_t &act,
                               const std::string &caller) {
@@ -80,6 +80,41 @@ static bool is_action_allowed(const hook_action_t &act,
     return !found;
 
   return true;
+}
+
+static std::string get_active_caller_lib() {
+  std::string caller_lib;
+
+  for (auto it = tls_caller_stack.rbegin(); it != tls_caller_stack.rend();
+       ++it) {
+    void *addr = *it;
+    if (addr) {
+      Dl_info info;
+      if (dladdr(addr, &info) && info.dli_fname) {
+        std::string fname = info.dli_fname;
+        if (fname.find("libaudit_core") != std::string::npos ||
+            fname.find("libaudit_hook") != std::string::npos) {
+          continue;
+        }
+        caller_lib = fname;
+        break;
+      }
+    }
+  }
+
+  if (caller_lib.find("ld-linux") != std::string::npos ||
+      caller_lib.find("ld.so") != std::string::npos ||
+      caller_lib.find("ld-musl") != std::string::npos) {
+    if (!tls_last_resolved_caller.empty()) {
+      caller_lib = tls_last_resolved_caller;
+    }
+  }
+
+  if (caller_lib.empty()) {
+    caller_lib = program_invocation_short_name;
+  }
+
+  return caller_lib;
 }
 
 // -----------------------------------------------------------------------------
@@ -295,11 +330,11 @@ ah_err_t ah_get_target(const char *tool_name, void **out_target) {
         if (!chain.is_dynamic_dispatch) {
           return AH_ERR_NOT_DYNAMIC;
         }
-        
+
         if (act.filter_libs.size() > 1) {
           return AH_ERR_MULTIPLE_RULES;
         }
-        
+
         if (act.filter_mode != AH_FILTER_GLOBAL) {
           return AH_ERR_NOT_GLOBAL;
         }
@@ -309,7 +344,7 @@ ah_err_t ah_get_target(const char *tool_name, void **out_target) {
       }
     }
   }
-  
+
   return AH_ERR_NOT_HOOKED;
 }
 
@@ -324,17 +359,16 @@ void ah_pop_caller(void) {
     tls_caller_stack.pop_back();
 }
 
-void *ah_get_next_hop(void **orig_out) {
-  void *caller_addr =
-      tls_caller_stack.empty() ? nullptr : tls_caller_stack.back();
-  std::string caller_lib;
+void ah_push_orig_ptr(void **orig_out) {
+  tls_active_orig_ptrs.push_back(orig_out);
+}
+void ah_pop_orig_ptr(void) {
+  if (!tls_active_orig_ptrs.empty())
+    tls_active_orig_ptrs.pop_back();
+}
 
-  if (caller_addr) {
-    Dl_info info;
-    if (dladdr(caller_addr, &info) && info.dli_fname) {
-      caller_lib = info.dli_fname;
-    }
-  }
+void *ah_get_next_hop(void **orig_out) {
+  std::string caller_lib = get_active_caller_lib();
 
   std::shared_lock lock(*get_hooks_mutex());
   for (const auto &pair : *get_hooks()) {
@@ -344,7 +378,13 @@ void *ah_get_next_hop(void **orig_out) {
 
     for (int i = chain.actions.size() - 1; i >= 0; --i) {
       if (chain.actions[i].original_out_ptr == orig_out) {
-        for (int j = i - 1; j >= 0; --j) {
+        // Evaluate `i - 1` if stepping down from inside a wrapper. 
+        // Evaluate `i` if invoked from outside by the GOT or dlsym.
+        bool is_stepping_down = (!tls_active_orig_ptrs.empty() &&
+                                 tls_active_orig_ptrs.back() == orig_out);
+        int start_idx = is_stepping_down ? i - 1 : i;
+
+        for (int j = start_idx; j >= 0; --j) {
           if (is_action_allowed(chain.actions[j], caller_lib)) {
             return chain.actions[j].trampoline_ptr;
           }
@@ -361,6 +401,8 @@ void *ah_get_next_hop(void **orig_out) {
 // -----------------------------------------------------------------------------
 // Internal Interceptors
 // -----------------------------------------------------------------------------
+
+static void *(*real_dlsym)(void *, const char *) = nullptr;
 
 extern "C" void *audit_dlsym_wrapper(void *handle, const char *symbol) {
   if (tls_hooks_paused || tls_hooks_ignored) {
@@ -380,12 +422,14 @@ extern "C" void *audit_dlsym_wrapper(void *handle, const char *symbol) {
       }
 
       if (!chain.actions.empty()) {
-        if (!chain.is_dynamic_dispatch) {
+        if (chain.is_dynamic_dispatch) {
+          return chain.actions.back().dispatcher_ptr;
+        } else {
           if (chain.actions.front().original_out_ptr) {
             *(chain.actions.front().original_out_ptr) = chain.native_os_ptr;
           }
+          return chain.actions.back().trampoline_ptr;
         }
-        return chain.actions.back().trampoline_ptr;
       }
     }
   }
@@ -432,9 +476,13 @@ void la_preinit(uintptr_t *cookie) {
 }
 
 unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
-  if (map && map->l_name) {
+  if (map) {
     std::unique_lock lock(*get_objects_mutex());
-    (*get_objects())[*cookie] = map->l_name;
+    if (map->l_name && map->l_name[0] != '\0') {
+      (*get_objects())[*cookie] = map->l_name;
+    } else {
+      (*get_objects())[*cookie] = program_invocation_short_name;
+    }
   }
   return LA_FLG_BINDTO | LA_FLG_BINDFROM;
 }
@@ -489,11 +537,6 @@ static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
       chain.native_os_ptr = reinterpret_cast<void *>(original_addr);
     }
 
-    if (chain.is_dynamic_dispatch) {
-      *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
-      return reinterpret_cast<uintptr_t>(chain.actions.back().trampoline_ptr);
-    }
-
     std::string caller_lib;
     {
       std::shared_lock obj_lock(*get_objects_mutex());
@@ -502,14 +545,17 @@ static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
         caller_lib = obj_it->second;
       }
     }
+    tls_last_resolved_caller = caller_lib;
+
+    if (chain.is_dynamic_dispatch) {
+      *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
+      return reinterpret_cast<uintptr_t>(chain.actions.back().dispatcher_ptr);
+    }
 
     for (int i = chain.actions.size() - 1; i >= 0; --i) {
       if (is_action_allowed(chain.actions[i], caller_lib)) {
-
-        if (!chain.is_dynamic_dispatch) {
-          if (chain.actions.front().original_out_ptr) {
-            *(chain.actions.front().original_out_ptr) = chain.native_os_ptr;
-          }
+        if (chain.actions.front().original_out_ptr) {
+          *(chain.actions.front().original_out_ptr) = chain.native_os_ptr;
         }
         *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
         return reinterpret_cast<uintptr_t>(chain.actions[i].trampoline_ptr);

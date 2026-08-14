@@ -15,6 +15,8 @@ bool ah_are_hooks_paused(void);
 
 void ah_push_caller(void *addr);
 void ah_pop_caller(void);
+void ah_push_orig_ptr(void **orig_out);
+void ah_pop_orig_ptr(void);
 void *ah_get_next_hop(void **orig_out);
 }
 
@@ -33,6 +35,7 @@ struct HookGenerator<Ret (*)(Args...), HookFunc, OriginalPtr> {
 
   static Ret Trampoline(Args... args) {
     ah_push_caller(__builtin_return_address(0));
+    ah_push_orig_ptr(reinterpret_cast<void **>(OriginalPtr));
     bool was_paused = ah_are_hooks_paused();
     if (!was_paused)
       ah_thread_pause_hooks();
@@ -41,11 +44,13 @@ struct HookGenerator<Ret (*)(Args...), HookFunc, OriginalPtr> {
       HookFunc(args...);
       if (!was_paused)
         ah_thread_resume_hooks();
+      ah_pop_orig_ptr();
       ah_pop_caller();
     } else {
       Ret ret = HookFunc(args...);
       if (!was_paused)
         ah_thread_resume_hooks();
+      ah_pop_orig_ptr();
       ah_pop_caller();
       return ret;
     }
