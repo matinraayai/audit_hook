@@ -80,6 +80,10 @@ static thread_local std::vector<void **> tls_active_orig_ptrs;
 static thread_local std::unordered_map<std::string, std::string>
     tls_chain_callers;
 
+// Callback registry for plugins that want la_objopen events
+typedef void (*ah_plugin_on_objopen_t)(const char *, uintptr_t);
+static std::vector<ah_plugin_on_objopen_t> plugin_objopen_callbacks;
+
 static bool is_action_allowed(const hook_action_t &act,
                               const std::string &caller) {
   if (act.filter_mode == AH_FILTER_GLOBAL) {
@@ -515,6 +519,16 @@ void la_preinit(uintptr_t *cookie) {
           fprintf(stderr, "[AuditCore] FATAL: Failed to load plugin '%s'\n",
                   plugin_path);
           fprintf(stderr, "[AuditCore] Error: %s\n", dlerror());
+        } else {
+          // Check if the plugin exports the objopen callback
+          auto cb = reinterpret_cast<ah_plugin_on_objopen_t>(
+              dlsym(handle, "ah_plugin_on_objopen"));
+          if (cb) {
+            plugin_objopen_callbacks.push_back(cb);
+            ah_debug_log("la_preinit: Discovered ah_plugin_on_objopen in "
+                         "plugin '%s'\n",
+                         plugin_path);
+          }
         }
         plugin_path = strtok_r(nullptr, ":", &saveptr);
       }
@@ -524,10 +538,25 @@ void la_preinit(uintptr_t *cookie) {
 }
 
 unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
-  if (map && map->l_name) {
+  const char *libname = nullptr;
+  if (map) {
     std::unique_lock lock(*get_objects_mutex());
-    (*get_objects())[*cookie] = map->l_name;
+    if (map->l_name && map->l_name[0] != '\0') {
+      (*get_objects())[*cookie] = map->l_name;
+      libname = map->l_name;
+    } else {
+      (*get_objects())[*cookie] = program_invocation_short_name;
+      libname = program_invocation_short_name;
+    }
   }
+
+  // Broadcast the event to all registered plugins
+  if (libname) {
+    for (auto cb : plugin_objopen_callbacks) {
+      cb(libname, *cookie);
+    }
+  }
+
   return LA_FLG_BINDTO | LA_FLG_BINDFROM;
 }
 

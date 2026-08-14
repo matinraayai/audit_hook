@@ -2,6 +2,7 @@
 
 #include "audit_hook_dynamic.h"
 #include <type_traits>
+#include <stdint.h>
 
 extern "C" {
 int ah_register_hook(const char *tool_name, const char *symbol_name,
@@ -16,6 +17,9 @@ bool ah_are_hooks_paused(void);
 void ah_push_orig_ptr(void **orig_out);
 void ah_pop_orig_ptr(void);
 void *ah_get_next_hop(void **orig_out, void *return_addr);
+
+// Optional callback implemented by the plugin to receive dynamic load events
+void ah_plugin_on_objopen(const char *libname, uintptr_t cookie);
 }
 
 namespace audit_hooks {
@@ -27,8 +31,6 @@ struct HookGenerator;
 template <typename Ret, typename... Args, auto HookFunc, auto OriginalPtr>
 struct HookGenerator<Ret (*)(Args...), HookFunc, OriginalPtr> {
   static Ret Dispatcher(Args... args) {
-    // __builtin_return_address(0) guarantees we capture the exact immediate
-    // caller of the Dispatcher, effortlessly bypassing ld.so lazy bindings.
     void *next = ah_get_next_hop(reinterpret_cast<void **>(OriginalPtr),
                                  __builtin_return_address(0));
     return reinterpret_cast<Ret (*)(Args...)>(next)(args...);

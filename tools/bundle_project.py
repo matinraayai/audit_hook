@@ -11,7 +11,7 @@ IGNORE_DIR_NAMES = {
 
 # File extensions to ignore (compiled binaries, objects, etc.)
 IGNORE_EXTS = {
-    '.o', '.a', '.so', '.lo', '.la', '.exe', '.dll', '.pyc',
+    '.o', '.a', '.so', '.lo', '.la', '.exe', '.dll', '.pyc', '.log', '.trs',
     '.png', '.jpg', '.jpeg', '.gif', '.pdf', '.zip', '.tar', '.gz'
 }
 

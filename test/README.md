@@ -60,6 +60,11 @@ The following tests validate the **Ordered Filtered Projections** model, ensurin
 | `run_test_mixed.sh` | `plugin_mix_a.cpp`, `plugin_mix_b.cpp` | **Mixed Action Divergence:** Proves that a filtered wrapper correctly and safely dispatches into a globally replaced function (rather than the native OS function), resolving the mix of `register_wrap` and `register_replace` states based on the caller. |
 | `run_fp_dynamic.sh` | `plugin_fp_dynamic.cpp` | **Runtime Filter Toggling (GOTCHA Function Pointer Adaptation):** Validates the `register_dynamic` API and namespace-bridging via the `libaudit_hook_dynamic.so` stub. Adapted from the GOTCHA function pointer test, it proves that a captured function pointer seamlessly reflects runtime-activated hooks (toggled via `ah_set_caller_filter`) without needing to be re-resolved by the OS. |
 
+### Hammer Test
+The Hammer Test (`app_hammer`) is an adaptation of the GOTCHA hammer test (originally located at https://github.com/llnl/GOTCHA/tree/develop/test/hammer). It uses C++ template metaprogramming to generate massive volumes of unique math functions (`Add<A,B>` and `Mult<A,B>`) that are compiled into a separate shared library.
+
+The application uses `dlopen()` to load the library at runtime. The framework broadcasts `la_objopen` events to `plugin_hammer`, which instantly responds by programmatically generating dozens of unique wrapper templates and registering them on-the-fly. The application executes the symbols to verify that either the Multiplies or the Additions were fully wrapped and negated, providing an intense stress test of `audit_hook`'s dynamic hash maps, locking concurrency, and namespace boundary string parsing.
+
 To compile and execute the test suite, run the following from the root directory:
 
 ```bash
