@@ -19,6 +19,15 @@
 // State Management & Dynamic Data Structures
 // -----------------------------------------------------------------------------
 
+static bool ah_debug_enabled = false;
+
+#define AH_DEBUG_LOG(...)                                                      \
+  do {                                                                         \
+    if (ah_debug_enabled) {                                                    \
+      fprintf(stderr, "[AH_DEBUG] " __VA_ARGS__);                              \
+    }                                                                          \
+  } while (0)
+
 struct hook_action_t {
   std::string tool_name;
   void *trampoline_ptr;
@@ -62,8 +71,11 @@ static thread_local std::unordered_map<void **, std::string> tls_chain_callers;
 
 static bool is_action_allowed(const hook_action_t &act,
                               const std::string &caller) {
-  if (act.filter_mode == AH_FILTER_GLOBAL)
+  if (act.filter_mode == AH_FILTER_GLOBAL) {
+    AH_DEBUG_LOG("is_action_allowed: '%s' -> GLOBAL => ALLOWED\n",
+                 act.tool_name.c_str());
     return true;
+  }
 
   bool found = false;
   for (const auto &lib : act.filter_libs) {
@@ -73,12 +85,19 @@ static bool is_action_allowed(const hook_action_t &act,
     }
   }
 
+  bool allowed = false;
   if (act.filter_mode == AH_FILTER_INCLUDE)
-    return found;
-  if (act.filter_mode == AH_FILTER_EXCLUDE)
-    return !found;
+    allowed = found;
+  else if (act.filter_mode == AH_FILTER_EXCLUDE)
+    allowed = !found;
 
-  return true;
+  AH_DEBUG_LOG("is_action_allowed: '%s' evaluating caller '%s' against %s "
+               "filter => %s\n",
+               act.tool_name.c_str(), caller.c_str(),
+               (act.filter_mode == AH_FILTER_INCLUDE ? "INCLUDE" : "EXCLUDE"),
+               (allowed ? "ALLOWED" : "DENIED"));
+
+  return allowed;
 }
 
 // -----------------------------------------------------------------------------
@@ -343,6 +362,10 @@ void *ah_get_next_hop(void **orig_out, void *return_addr) {
     caller_lib = tls_chain_callers[orig_out];
   }
 
+  AH_DEBUG_LOG(
+      "ah_get_next_hop: orig_out=%p, caller='%s', is_stepping_down=%s\n",
+      orig_out, caller_lib.c_str(), is_stepping_down ? "true" : "false");
+
   std::shared_lock lock(*get_hooks_mutex());
   for (const auto &pair : *get_hooks()) {
     const auto &chain = pair.second;
@@ -353,15 +376,27 @@ void *ah_get_next_hop(void **orig_out, void *return_addr) {
       if (chain.actions[i].original_out_ptr == orig_out) {
         int start_idx = is_stepping_down ? i - 1 : i;
 
+        AH_DEBUG_LOG("ah_get_next_hop: Found tool '%s' matched to orig_out. "
+                     "Evaluating from chain index %d down.\n",
+                     chain.actions[i].tool_name.c_str(), start_idx);
+
         for (int j = start_idx; j >= 0; --j) {
           if (is_action_allowed(chain.actions[j], caller_lib)) {
+            AH_DEBUG_LOG("ah_get_next_hop: Routing to tool '%s' trampoline\n",
+                         chain.actions[j].tool_name.c_str());
             return chain.actions[j].trampoline_ptr;
           }
         }
+
+        AH_DEBUG_LOG("ah_get_next_hop: Filters exhausted. Routing to native OS "
+                     "pointer (%p)\n",
+                     chain.native_os_ptr);
         return chain.native_os_ptr;
       }
     }
   }
+
+  AH_DEBUG_LOG("ah_get_next_hop: orig_out not found in chain! Returning NULL\n");
   return nullptr;
 }
 
@@ -423,6 +458,11 @@ unsigned int la_version(unsigned int version) {
 }
 
 void la_preinit(uintptr_t *cookie) {
+  if (getenv("AH_DEBUG")) {
+    ah_debug_enabled = true;
+    AH_DEBUG_LOG("Diagnostics Enabled.\n");
+  }
+
   const char *plugins_env = getenv("AH_PLUGINS");
   if (plugins_env) {
     char *env_copy = strdup(plugins_env);
@@ -503,6 +543,8 @@ static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
     }
 
     if (chain.is_dynamic_dispatch) {
+      AH_DEBUG_LOG("process_symbind: Binding '%s' to Dynamic Dispatcher\n",
+                   symname);
       *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
       return reinterpret_cast<uintptr_t>(chain.actions.back().dispatcher_ptr);
     }
@@ -521,6 +563,8 @@ static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
         if (chain.actions.front().original_out_ptr) {
           *(chain.actions.front().original_out_ptr) = chain.native_os_ptr;
         }
+        AH_DEBUG_LOG("process_symbind: Binding '%s' to Static Trampoline '%s'\n",
+                     symname, chain.actions[i].tool_name.c_str());
         *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
         return reinterpret_cast<uintptr_t>(chain.actions[i].trampoline_ptr);
       }
