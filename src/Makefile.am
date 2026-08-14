@@ -1,9 +1,13 @@
-# Define the core LD_AUDIT engine library
-lib_LTLIBRARIES = libaudit_core.la
+AM_CPPFLAGS = -I$(top_srcdir)/include
 
-# Sources and compiler flags
+lib_LTLIBRARIES = libaudit_core.la libaudit_hook_dynamic.la
+
+# The LD_AUDIT backend engine
 libaudit_core_la_SOURCES = audit_core.cpp
-libaudit_core_la_CXXFLAGS = -fPIC -I$(top_srcdir)/include
+libaudit_core_la_CXXFLAGS = -fPIC -shared
+libaudit_core_la_LDFLAGS = -module -avoid-version
 
-# Linker flags: create a shared library, link libdl, and avoid versioning numbers (.so.1.0.0)
-libaudit_core_la_LDFLAGS = -shared -ldl -avoid-version
+# The dummy library for application linkage
+libaudit_hook_dynamic_la_SOURCES = audit_hook_dynamic.cpp
+libaudit_hook_dynamic_la_CXXFLAGS = -fPIC
+libaudit_hook_dynamic_la_LDFLAGS = -shared -avoid-version

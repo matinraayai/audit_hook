@@ -1,3 +1,5 @@
+AM_CPPFLAGS = -I$(top_srcdir)/include
+
 # Define what we are building
 check_PROGRAMS = app_simple app_dlsym app_dlopen
 check_LTLIBRARIES = libdummy.la libnum.la libnum2.la libtest_replace.la libtest_wrap.la libtest_dlsym_plugin.la libtest_dlopen_plugin.la
@@ -156,3 +158,18 @@ libplugin_mix_b_la_CXXFLAGS = $(PLUGIN_FLAGS)
 libplugin_mix_b_la_LDFLAGS = $(PLUGIN_LIBS)
 
 TESTS += run_test_mixed.sh
+
+# --- Test 4: Dynamic Dispatch Runtime Toggle ---
+check_PROGRAMS += app_fp_dynamic
+check_LTLIBRARIES += libplugin_fp_dynamic.la
+
+app_fp_dynamic_SOURCES = app_fp_dynamic.c
+# Link against the target library and the new dummy library
+app_fp_dynamic_LDADD = libdispatch_target.la ../src/libaudit_hook_dynamic.la
+
+libplugin_fp_dynamic_la_SOURCES = plugin_fp_dynamic.cpp
+libplugin_fp_dynamic_la_CXXFLAGS = $(PLUGIN_FLAGS)
+libplugin_fp_dynamic_la_LDFLAGS = $(PLUGIN_LIBS)
+
+TESTS += run_fp_dynamic.sh
+

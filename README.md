@@ -70,6 +70,14 @@ The framework uses an **Ordered Filtered Projection** model to guarantee that fi
 * The frontend seamlessly replaces the raw function pointer call with a heavily optimized `Dispatcher` thunk.
 * The dispatcher pushes the caller's address to a Thread-Local Storage (TLS) stack. The core engine dynamically resolves the library via `dladdr`, recalculates the valid subset of wrappers for that specific caller, and routes execution perfectly on the fly.
 
+### First-Class Dynamic Dispatch & Runtime Toggling
 
+In addition to automatic fallback, tools can explicitly force a hook into dynamic routing using `audit_hooks::register_dynamic`. This is incredibly powerful for applications that need to toggle hooks on or off mid-execution. 
+
+Because `LD_AUDIT` operates in a completely isolated linker namespace (`LM_ID_NEWLM`), the main application cannot directly call the auditor's memory. To solve this, `audit_hook` ships with a safe namespace bridge:
+1. Target applications `#include <audit_hook_dynamic.hpp>` and link against the provided `libaudit_hook_dynamic.so` stub.
+2. The application calls `ah_set_caller_filter(...)` to toggle its routing.
+3. The `LD_AUDIT` engine intercepts the `la_symbind` resolution for the stub library, instantly bridging the call into the auditor's isolated namespace.
+4. The Dynamic Dispatcher re-evaluates the active chain, seamlessly changing the behavior of any previously captured function pointers.
 
 ```

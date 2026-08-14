@@ -89,13 +89,18 @@ static bool is_action_allowed(const hook_action_t &act,
 extern "C" {
 
 int ah_register_hook(const char *tool_name, const char *symbol_name,
-                     void *hook_func, void **original_out, void *dispatcher) {
+                     void *hook_func, void **original_out, void *dispatcher,
+                     bool force_dynamic) {
   if (!tool_name || !symbol_name || !hook_func)
     return -1;
 
   std::unique_lock lock(*get_hooks_mutex());
   auto &chain = (*get_hooks())[symbol_name];
   chain.symbol_name = symbol_name;
+
+  if (force_dynamic) {
+    chain.is_dynamic_dispatch = true;
+  }
 
   hook_action_t action;
   action.tool_name = tool_name;
@@ -125,6 +130,9 @@ int ah_register_hook(const char *tool_name, const char *symbol_name,
               symbol_name, chain.actions.back().tool_name.c_str(), tool_name);
       chain.actions.clear();
       chain.is_dynamic_dispatch = false;
+      if (force_dynamic) {
+        chain.is_dynamic_dispatch = true;
+      }
       chain.actions.push_back(action);
       return 0;
     }
@@ -132,7 +140,6 @@ int ah_register_hook(const char *tool_name, const char *symbol_name,
 
   chain.actions.push_back(action);
 
-  // Wire up static chaining automatically if we are not in dynamic mode
   if (chain.actions.size() > 1 && !chain.is_dynamic_dispatch) {
     if (action.original_out_ptr) {
       *(action.original_out_ptr) =
@@ -254,6 +261,58 @@ int ah_set_caller_filter(const char *tool_name, ah_filter_mode_t mode,
   return 0;
 }
 
+int ah_set_target(const char *tool_name, void *new_target) {
+  if (!tool_name || !new_target)
+    return -1;
+
+  std::unique_lock lock(*get_hooks_mutex());
+  for (auto &pair : *get_hooks()) {
+    auto &chain = pair.second;
+    for (auto &act : chain.actions) {
+      if (act.tool_name == tool_name) {
+        if (!chain.is_dynamic_dispatch) {
+          return -1;
+        }
+        act.filter_mode = AH_FILTER_GLOBAL;
+        act.filter_libs.clear();
+        act.trampoline_ptr = new_target;
+        return 0;
+      }
+    }
+  }
+  return -1;
+}
+
+ah_err_t ah_get_target(const char *tool_name, void **out_target) {
+  if (!tool_name || !out_target)
+    return AH_ERR_NOT_HOOKED;
+
+  std::shared_lock lock(*get_hooks_mutex());
+  for (const auto &pair : *get_hooks()) {
+    const auto &chain = pair.second;
+    for (const auto &act : chain.actions) {
+      if (act.tool_name == tool_name) {
+        if (!chain.is_dynamic_dispatch) {
+          return AH_ERR_NOT_DYNAMIC;
+        }
+        
+        if (act.filter_libs.size() > 1) {
+          return AH_ERR_MULTIPLE_RULES;
+        }
+        
+        if (act.filter_mode != AH_FILTER_GLOBAL) {
+          return AH_ERR_NOT_GLOBAL;
+        }
+
+        *out_target = act.trampoline_ptr;
+        return AH_SUCCESS;
+      }
+    }
+  }
+  
+  return AH_ERR_NOT_HOOKED;
+}
+
 void ah_thread_pause_hooks(void) { tls_hooks_paused = true; }
 void ah_thread_resume_hooks(void) { tls_hooks_paused = false; }
 void ah_thread_ignore_hooks(void) { tls_hooks_ignored = true; }
@@ -322,7 +381,6 @@ extern "C" void *audit_dlsym_wrapper(void *handle, const char *symbol) {
 
       if (!chain.actions.empty()) {
         if (!chain.is_dynamic_dispatch) {
-          // BUG FIX: Only the true innermost wrapper receives the native OS ptr.
           if (chain.actions.front().original_out_ptr) {
             *(chain.actions.front().original_out_ptr) = chain.native_os_ptr;
           }
@@ -390,9 +448,32 @@ unsigned int la_objclose(uintptr_t *cookie) {
 static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
                                  unsigned int *flags, uintptr_t *refcook) {
   if (strcmp(symname, "dlsym") == 0) {
-    real_dlsym = reinterpret_cast<void *(*)(void *, const char *)>(original_addr);
+    real_dlsym =
+        reinterpret_cast<void *(*)(void *, const char *)>(original_addr);
     *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
     return reinterpret_cast<uintptr_t>(&audit_dlsym_wrapper);
+  }
+
+  if (strcmp(symname, "ah_set_caller_filter") == 0) {
+    *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
+    using filter_ptr_t = int (*)(const char *, ah_filter_mode_t, const char **,
+                                 size_t);
+    return reinterpret_cast<uintptr_t>(
+        static_cast<filter_ptr_t>(&ah_set_caller_filter));
+  }
+
+  if (strcmp(symname, "ah_set_target") == 0) {
+    *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
+    using set_target_ptr_t = int (*)(const char *, void *);
+    return reinterpret_cast<uintptr_t>(
+        static_cast<set_target_ptr_t>(&ah_set_target));
+  }
+
+  if (strcmp(symname, "ah_get_target") == 0) {
+    *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
+    using get_target_ptr_t = ah_err_t (*)(const char *, void **);
+    return reinterpret_cast<uintptr_t>(
+        static_cast<get_target_ptr_t>(&ah_get_target));
   }
 
   if (tls_hooks_paused || tls_hooks_ignored) {
@@ -408,6 +489,11 @@ static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
       chain.native_os_ptr = reinterpret_cast<void *>(original_addr);
     }
 
+    if (chain.is_dynamic_dispatch) {
+      *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
+      return reinterpret_cast<uintptr_t>(chain.actions.back().trampoline_ptr);
+    }
+
     std::string caller_lib;
     {
       std::shared_lock obj_lock(*get_objects_mutex());
@@ -421,7 +507,6 @@ static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
       if (is_action_allowed(chain.actions[i], caller_lib)) {
 
         if (!chain.is_dynamic_dispatch) {
-          // BUG FIX: Only the true innermost wrapper receives the native OS ptr.
           if (chain.actions.front().original_out_ptr) {
             *(chain.actions.front().original_out_ptr) = chain.native_os_ptr;
           }
