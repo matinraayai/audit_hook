@@ -35,7 +35,30 @@ Because `LD_AUDIT` libraries operate very early in the process lifecycle and wit
 *   **Description:** Validates that plugins can dynamically filter their own execution based on the identity of the calling library (emulating GOTCHA's `gotcha_filter_libraries_by_name`). It uses `dladdr` and `__builtin_return_address(1)` inside the C++ wrapper to bypass hooks if the call did not originate from the allowed shared object.
 *   **Attribution:** This test case and its associated logic were derived from LLNL's GOTCHA framework test suite, specifically: [https://github.com/llnl/GOTCHA/tree/develop/test/filter](https://github.com/llnl/GOTCHA/tree/develop/test/filter).
 
-## Running the Tests
+## Core API & Integration Tests
+
+The `test/` directory contains several integration tests that validate the core functionality of the `LD_AUDIT` backend engine and the C++20 API. Each test consists of a target application, a dummy library, a C++ plugin, and a bash script runner.
+
+| Script | Plugin | What it validates |
+| :--- | :--- | :--- |
+| `run_replace.sh` | `test_replace.cpp` | **Pure Replacement:** Validates `register_replace` for zero-overhead function swapping. |
+| `run_wrap.sh` | `test_wrap.cpp` | **Function Wrapping:** Validates `register_wrap` to intercept a function, execute custom logic, and seamlessly call the original underlying pointer. |
+| `run_dlsym.sh` | `test_dlsym_plugin.cpp` | **dlsym Interception:** Validates that the framework successfully intercepts dynamic symbol lookups via `dlsym` and routes them to our trampolines. |
+| `run_dlopen.sh` | `test_dlopen_plugin.cpp` | **Late-Bound dlopen:** Validates that hooks successfully attach to libraries loaded lazily via `dlopen` at runtime. |
+| `run_filter.sh` | `test_filter_plugin.cpp` | **Basic Caller Filtering:** Validates that `ah_set_caller_filter` successfully isolates a hook to a specific calling library using `AH_FILTER_INCLUDE`. |
+| `run_comp.sh` | `test_comp_plugin.cpp` | **Hook Composition:** Validates the chaining rules when multiple directives target the same function (Wrap $\rightarrow$ Replace, Replace $\rightarrow$ Wrap, Wrap $\rightarrow$ Wrap, Replace $\rightarrow$ Replace) and ensures the correct warnings are emitted. |
+| `run_filter_state.sh` | `test_filter_state_plugin.cpp` | **Filter State Machine:** Validates the complex set-logic of caller filters (e.g., Include $\rightarrow$ Exclude set differences and their respective warnings). |
+
+## Dynamic Dispatch & Filter Isolation Tests
+
+The following tests validate the **Ordered Filtered Projections** model, ensuring that caller-specific filters isolate plugins correctly and trigger dynamic dispatch only when necessary. All three tests utilize shared dummy libraries (`libdispatch_target.so`, `libdispatch_x.so`, and `libdispatch_y.so`) to simulate distinct callers hitting the same target functions.
+
+| Script                  | Plugins                                  | What it validates                                                                                                                                                                                                                                           |                      |
+|:------------------------|:-----------------------------------------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------|
+| `run_test_divergent.sh` | `plugin_div_a.cpp`, `plugin_div_b.cpp`   | **Divergent Wrapper Chain:** Proves that applying a caller-specific filter to a multiply-wrapped function correctly detects a conflict and triggers the dynamic dispatcher, routing `libX` and `libY` to different wrapper chains on the fly.               |                      |
+| `run_test_static.sh`    | `plugin_stat_a.cpp`, `plugin_stat_b.cpp` | **Pure Static Chain:** Proves that multiple global wrappers safely fall back to chaining via zero-overhead static pointers, correctly skipping the dynamic dispatcher.                                                                                      |                      |
+| `run_test_mixed.sh`     | `plugin_mix_a.cpp`, `plugin_mix_b.cpp`   | **Mixed Action Divergence:** Proves that a filtered wrapper correctly and safely dispatches into a globally replaced function (rather than the native OS function), resolving the mix of `register_wrap` and `register_replace` states based on the caller. | ## Running the Tests |
+|                         |                                          |                                                                                                                                                                                                                                                             |                      |
 
 To compile and execute the test suite, run the following from the root directory:
 

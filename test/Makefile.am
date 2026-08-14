@@ -91,3 +91,68 @@ libtest_filter_state_plugin_la_CXXFLAGS = $(PLUGIN_FLAGS)
 libtest_filter_state_plugin_la_LDFLAGS = $(PLUGIN_LIBS)
 
 TESTS += run_filter_state.sh
+
+# --- Shared Libraries for Dynamic Dispatch Tests ---
+check_LTLIBRARIES += libdispatch_target.la libdispatch_x.la libdispatch_y.la
+
+libdispatch_target_la_SOURCES = libdispatch_target.c
+libdispatch_target_la_LDFLAGS = -shared -avoid-version -rpath $(abs_builddir)
+
+libdispatch_x_la_SOURCES = libdispatch_x.c
+libdispatch_x_la_LIBADD = libdispatch_target.la
+libdispatch_x_la_LDFLAGS = -shared -avoid-version -rpath $(abs_builddir)
+
+libdispatch_y_la_SOURCES = libdispatch_y.c
+libdispatch_y_la_LIBADD = libdispatch_target.la
+libdispatch_y_la_LDFLAGS = -shared -avoid-version -rpath $(abs_builddir)
+
+# --- Test 1: Divergent Wrapper Chain ---
+check_PROGRAMS += app_test_divergent
+check_LTLIBRARIES += libplugin_div_a.la libplugin_div_b.la
+
+app_test_divergent_SOURCES = app_test_divergent.c
+app_test_divergent_LDADD = libdispatch_x.la libdispatch_y.la
+
+libplugin_div_a_la_SOURCES = plugin_div_a.cpp
+libplugin_div_a_la_CXXFLAGS = $(PLUGIN_FLAGS)
+libplugin_div_a_la_LDFLAGS = $(PLUGIN_LIBS)
+
+libplugin_div_b_la_SOURCES = plugin_div_b.cpp
+libplugin_div_b_la_CXXFLAGS = $(PLUGIN_FLAGS)
+libplugin_div_b_la_LDFLAGS = $(PLUGIN_LIBS)
+
+TESTS += run_test_divergent.sh
+
+# --- Test 2: Pure Static Chain ---
+check_PROGRAMS += app_test_static
+check_LTLIBRARIES += libplugin_stat_a.la libplugin_stat_b.la
+
+app_test_static_SOURCES = app_test_static.c
+app_test_static_LDADD = libdispatch_x.la libdispatch_y.la
+
+libplugin_stat_a_la_SOURCES = plugin_stat_a.cpp
+libplugin_stat_a_la_CXXFLAGS = $(PLUGIN_FLAGS)
+libplugin_stat_a_la_LDFLAGS = $(PLUGIN_LIBS)
+
+libplugin_stat_b_la_SOURCES = plugin_stat_b.cpp
+libplugin_stat_b_la_CXXFLAGS = $(PLUGIN_FLAGS)
+libplugin_stat_b_la_LDFLAGS = $(PLUGIN_LIBS)
+
+TESTS += run_test_static.sh
+
+# --- Test 3: Mixed Divergence ---
+check_PROGRAMS += app_test_mixed
+check_LTLIBRARIES += libplugin_mix_a.la libplugin_mix_b.la
+
+app_test_mixed_SOURCES = app_test_mixed.c
+app_test_mixed_LDADD = libdispatch_x.la libdispatch_y.la
+
+libplugin_mix_a_la_SOURCES = plugin_mix_a.cpp
+libplugin_mix_a_la_CXXFLAGS = $(PLUGIN_FLAGS)
+libplugin_mix_a_la_LDFLAGS = $(PLUGIN_LIBS)
+
+libplugin_mix_b_la_SOURCES = plugin_mix_b.cpp
+libplugin_mix_b_la_CXXFLAGS = $(PLUGIN_FLAGS)
+libplugin_mix_b_la_LDFLAGS = $(PLUGIN_LIBS)
+
+TESTS += run_test_mixed.sh
