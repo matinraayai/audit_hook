@@ -6,7 +6,7 @@
 autoreconf -i && ./configure && make && make check
 ```
 
-`make check` runs 7 integration tests via shell scripts in `test/`. Diagnostics go to `test/test-suite.log`.
+`make check` runs 12 integration tests (shell scripts in `test/`). Diagnostics go to `test/test-suite.log`.
 
 ## Architecture
 

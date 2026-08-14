@@ -4,6 +4,12 @@ AM_CPPFLAGS = -I$(top_srcdir)/include
 # ------------------------------------------------------------------------------
 # Shared Libraries & Plugins
 # ------------------------------------------------------------------------------
+
+# From AGENTS.md: Plugins must link against src/libaudit_core.la and use these flags.
+# All shared libs use -avoid-version to produce plain .so files without sonames.
+PLUGIN_LIBS = -module -shared -avoid-version -rpath $(abs_builddir) $(top_builddir)/src/libaudit_core.la
+COMMON_LIB_FLAGS = -shared -avoid-version -rpath $(abs_builddir)
+
 lib_LTLIBRARIES = \
     libnum.la \
     libnum2.la \
@@ -33,39 +39,85 @@ lib_LTLIBRARIES = \
 
 # Target & Dummy C Libraries
 libnum_la_SOURCES = libnum.c
+libnum_la_LDFLAGS = $(COMMON_LIB_FLAGS)
+
 libnum2_la_SOURCES = libnum2.c
+libnum2_la_LDFLAGS = $(COMMON_LIB_FLAGS)
+
 libnum3_la_SOURCES = libnum3.c
+libnum3_la_LDFLAGS = $(COMMON_LIB_FLAGS)
+
 libcomp_la_SOURCES = libcomp.c
+libcomp_la_LDFLAGS = $(COMMON_LIB_FLAGS)
+
 libdummy_la_SOURCES = dummy_lib.c
+libdummy_la_LDFLAGS = $(COMMON_LIB_FLAGS)
+
 libdispatch_x_la_SOURCES = libdispatch_x.c
+libdispatch_x_la_LDFLAGS = $(COMMON_LIB_FLAGS)
+
 libdispatch_y_la_SOURCES = libdispatch_y.c
+libdispatch_y_la_LDFLAGS = $(COMMON_LIB_FLAGS)
+
 libdispatch_target_la_SOURCES = libdispatch_target.c
+libdispatch_target_la_LDFLAGS = $(COMMON_LIB_FLAGS)
 
 # Hammer test architecture
 libhammer_math_la_SOURCES = libhammer_math.cpp
 libhammer_math_la_CXXFLAGS = $(AM_CXXFLAGS)
+libhammer_math_la_LDFLAGS = $(COMMON_LIB_FLAGS)
 
 libhammer_check_la_SOURCES = libhammer_check.cpp
 libhammer_check_la_CXXFLAGS = $(AM_CXXFLAGS)
+libhammer_check_la_LDFLAGS = $(COMMON_LIB_FLAGS)
 libhammer_check_la_LIBADD = libhammer_math.la
 
 # Plugins
 libtest_replace_la_SOURCES = test_replace.cpp
+libtest_replace_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libtest_wrap_la_SOURCES = test_wrap.cpp
+libtest_wrap_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libtest_dlsym_plugin_la_SOURCES = test_dlsym_plugin.cpp
+libtest_dlsym_plugin_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libtest_dlopen_plugin_la_SOURCES = test_dlopen_plugin.cpp
+libtest_dlopen_plugin_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libtest_filter_plugin_la_SOURCES = test_filter_plugin.cpp
+libtest_filter_plugin_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libtest_comp_plugin_la_SOURCES = test_comp_plugin.cpp
+libtest_comp_plugin_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libtest_filter_state_plugin_la_SOURCES = test_filter_state_plugin.cpp
+libtest_filter_state_plugin_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libplugin_stat_a_la_SOURCES = plugin_stat_a.cpp
+libplugin_stat_a_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libplugin_stat_b_la_SOURCES = plugin_stat_b.cpp
+libplugin_stat_b_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libplugin_div_a_la_SOURCES = plugin_div_a.cpp
+libplugin_div_a_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libplugin_div_b_la_SOURCES = plugin_div_b.cpp
+libplugin_div_b_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libplugin_mix_a_la_SOURCES = plugin_mix_a.cpp
+libplugin_mix_a_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libplugin_mix_b_la_SOURCES = plugin_mix_b.cpp
+libplugin_mix_b_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libplugin_fp_dynamic_la_SOURCES = plugin_fp_dynamic.cpp
+libplugin_fp_dynamic_la_LDFLAGS = $(PLUGIN_LIBS)
+
 libplugin_hammer_la_SOURCES = plugin_hammer.cpp
 libplugin_hammer_la_CXXFLAGS = $(AM_CXXFLAGS)
+libplugin_hammer_la_LDFLAGS = $(PLUGIN_LIBS)
 
 # ------------------------------------------------------------------------------
 # Test Executables
@@ -91,8 +143,8 @@ app_dlsym_LDADD = libnum.la
 app_dlsym_LDFLAGS = -ldl
 
 app_dlopen_SOURCES = app_dlopen.c
-app_dlopen_LDADD = libnum.la
 app_dlopen_LDFLAGS = -ldl
+# FIXED: libnum.la removed from LDADD; it must be dlopen'd dynamically!
 
 app_filter_SOURCES = app_filter.c
 app_filter_LDADD = libnum.la libnum2.la libnum3.la
