@@ -13,11 +13,9 @@ void ah_thread_resume_hooks(void);
 void ah_thread_ignore_hooks(void);
 bool ah_are_hooks_paused(void);
 
-void ah_push_caller(void *addr);
-void ah_pop_caller(void);
 void ah_push_orig_ptr(void **orig_out);
 void ah_pop_orig_ptr(void);
-void *ah_get_next_hop(void **orig_out);
+void *ah_get_next_hop(void **orig_out, void *return_addr);
 }
 
 namespace audit_hooks {
@@ -29,12 +27,14 @@ struct HookGenerator;
 template <typename Ret, typename... Args, auto HookFunc, auto OriginalPtr>
 struct HookGenerator<Ret (*)(Args...), HookFunc, OriginalPtr> {
   static Ret Dispatcher(Args... args) {
-    void *next = ah_get_next_hop(reinterpret_cast<void **>(OriginalPtr));
+    // __builtin_return_address(0) guarantees we capture the exact immediate 
+    // caller of the Dispatcher, effortlessly bypassing ld.so lazy bindings.
+    void *next = ah_get_next_hop(reinterpret_cast<void **>(OriginalPtr),
+                                 __builtin_return_address(0));
     return reinterpret_cast<Ret (*)(Args...)>(next)(args...);
   }
 
   static Ret Trampoline(Args... args) {
-    ah_push_caller(__builtin_return_address(0));
     ah_push_orig_ptr(reinterpret_cast<void **>(OriginalPtr));
     bool was_paused = ah_are_hooks_paused();
     if (!was_paused)
@@ -45,13 +45,11 @@ struct HookGenerator<Ret (*)(Args...), HookFunc, OriginalPtr> {
       if (!was_paused)
         ah_thread_resume_hooks();
       ah_pop_orig_ptr();
-      ah_pop_caller();
     } else {
       Ret ret = HookFunc(args...);
       if (!was_paused)
         ah_thread_resume_hooks();
       ah_pop_orig_ptr();
-      ah_pop_caller();
       return ret;
     }
   }

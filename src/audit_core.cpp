@@ -57,9 +57,8 @@ static std::shared_mutex *get_objects_mutex() {
 
 static thread_local bool tls_hooks_paused = false;
 static thread_local bool tls_hooks_ignored = false;
-static thread_local std::vector<void *> tls_caller_stack;
 static thread_local std::vector<void **> tls_active_orig_ptrs;
-static thread_local std::string tls_last_resolved_caller;
+static thread_local std::unordered_map<void **, std::string> tls_chain_callers;
 
 static bool is_action_allowed(const hook_action_t &act,
                               const std::string &caller) {
@@ -80,41 +79,6 @@ static bool is_action_allowed(const hook_action_t &act,
     return !found;
 
   return true;
-}
-
-static std::string get_active_caller_lib() {
-  std::string caller_lib;
-
-  for (auto it = tls_caller_stack.rbegin(); it != tls_caller_stack.rend();
-       ++it) {
-    void *addr = *it;
-    if (addr) {
-      Dl_info info;
-      if (dladdr(addr, &info) && info.dli_fname) {
-        std::string fname = info.dli_fname;
-        if (fname.find("libaudit_core") != std::string::npos ||
-            fname.find("libaudit_hook") != std::string::npos) {
-          continue;
-        }
-        caller_lib = fname;
-        break;
-      }
-    }
-  }
-
-  if (caller_lib.find("ld-linux") != std::string::npos ||
-      caller_lib.find("ld.so") != std::string::npos ||
-      caller_lib.find("ld-musl") != std::string::npos) {
-    if (!tls_last_resolved_caller.empty()) {
-      caller_lib = tls_last_resolved_caller;
-    }
-  }
-
-  if (caller_lib.empty()) {
-    caller_lib = program_invocation_short_name;
-  }
-
-  return caller_lib;
 }
 
 // -----------------------------------------------------------------------------
@@ -353,12 +317,6 @@ void ah_thread_resume_hooks(void) { tls_hooks_paused = false; }
 void ah_thread_ignore_hooks(void) { tls_hooks_ignored = true; }
 bool ah_are_hooks_paused(void) { return tls_hooks_paused || tls_hooks_ignored; }
 
-void ah_push_caller(void *addr) { tls_caller_stack.push_back(addr); }
-void ah_pop_caller(void) {
-  if (!tls_caller_stack.empty())
-    tls_caller_stack.pop_back();
-}
-
 void ah_push_orig_ptr(void **orig_out) {
   tls_active_orig_ptrs.push_back(orig_out);
 }
@@ -367,8 +325,23 @@ void ah_pop_orig_ptr(void) {
     tls_active_orig_ptrs.pop_back();
 }
 
-void *ah_get_next_hop(void **orig_out) {
-  std::string caller_lib = get_active_caller_lib();
+void *ah_get_next_hop(void **orig_out, void *return_addr) {
+  bool is_stepping_down = (!tls_active_orig_ptrs.empty() &&
+                           tls_active_orig_ptrs.back() == orig_out);
+
+  std::string caller_lib;
+
+  if (!is_stepping_down) {
+    Dl_info info;
+    if (dladdr(return_addr, &info) && info.dli_fname) {
+      caller_lib = info.dli_fname;
+    } else {
+      caller_lib = program_invocation_short_name;
+    }
+    tls_chain_callers[orig_out] = caller_lib;
+  } else {
+    caller_lib = tls_chain_callers[orig_out];
+  }
 
   std::shared_lock lock(*get_hooks_mutex());
   for (const auto &pair : *get_hooks()) {
@@ -378,10 +351,6 @@ void *ah_get_next_hop(void **orig_out) {
 
     for (int i = chain.actions.size() - 1; i >= 0; --i) {
       if (chain.actions[i].original_out_ptr == orig_out) {
-        // Evaluate `i - 1` if stepping down from inside a wrapper. 
-        // Evaluate `i` if invoked from outside by the GOT or dlsym.
-        bool is_stepping_down = (!tls_active_orig_ptrs.empty() &&
-                                 tls_active_orig_ptrs.back() == orig_out);
         int start_idx = is_stepping_down ? i - 1 : i;
 
         for (int j = start_idx; j >= 0; --j) {
@@ -476,13 +445,9 @@ void la_preinit(uintptr_t *cookie) {
 }
 
 unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie) {
-  if (map) {
+  if (map && map->l_name) {
     std::unique_lock lock(*get_objects_mutex());
-    if (map->l_name && map->l_name[0] != '\0') {
-      (*get_objects())[*cookie] = map->l_name;
-    } else {
-      (*get_objects())[*cookie] = program_invocation_short_name;
-    }
+    (*get_objects())[*cookie] = map->l_name;
   }
   return LA_FLG_BINDTO | LA_FLG_BINDFROM;
 }
@@ -537,6 +502,11 @@ static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
       chain.native_os_ptr = reinterpret_cast<void *>(original_addr);
     }
 
+    if (chain.is_dynamic_dispatch) {
+      *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
+      return reinterpret_cast<uintptr_t>(chain.actions.back().dispatcher_ptr);
+    }
+
     std::string caller_lib;
     {
       std::shared_lock obj_lock(*get_objects_mutex());
@@ -544,12 +514,6 @@ static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
       if (obj_it != get_objects()->end()) {
         caller_lib = obj_it->second;
       }
-    }
-    tls_last_resolved_caller = caller_lib;
-
-    if (chain.is_dynamic_dispatch) {
-      *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
-      return reinterpret_cast<uintptr_t>(chain.actions.back().dispatcher_ptr);
     }
 
     for (int i = chain.actions.size() - 1; i >= 0; --i) {
