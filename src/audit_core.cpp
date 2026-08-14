@@ -4,6 +4,7 @@
 
 #include "audit_hook.hpp"
 #include <algorithm>
+#include <cstdarg>
 #include <dlfcn.h>
 #include <link.h>
 #include <mutex>
@@ -16,17 +17,24 @@
 #include <vector>
 
 // -----------------------------------------------------------------------------
-// State Management & Dynamic Data Structures
+// Diagnostics & Logging
 // -----------------------------------------------------------------------------
 
 static bool ah_debug_enabled = false;
 
-#define AH_DEBUG_LOG(...)                                                      \
-  do {                                                                         \
-    if (ah_debug_enabled) {                                                    \
-      fprintf(stderr, "[AH_DEBUG] " __VA_ARGS__);                              \
-    }                                                                          \
-  } while (0)
+inline void ah_debug_log(const char *format, ...) {
+  if (ah_debug_enabled) {
+    fprintf(stderr, "[AH_DEBUG] ");
+    va_list args;
+    va_start(args, format);
+    vfprintf(stderr, format, args);
+    va_end(args);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// State Management & Dynamic Data Structures
+// -----------------------------------------------------------------------------
 
 struct hook_action_t {
   std::string tool_name;
@@ -67,12 +75,15 @@ static std::shared_mutex *get_objects_mutex() {
 static thread_local bool tls_hooks_paused = false;
 static thread_local bool tls_hooks_ignored = false;
 static thread_local std::vector<void **> tls_active_orig_ptrs;
-static thread_local std::unordered_map<void **, std::string> tls_chain_callers;
+
+// Map the symbol_name to the active caller to solve the step-down paradox
+static thread_local std::unordered_map<std::string, std::string>
+    tls_chain_callers;
 
 static bool is_action_allowed(const hook_action_t &act,
                               const std::string &caller) {
   if (act.filter_mode == AH_FILTER_GLOBAL) {
-    AH_DEBUG_LOG("is_action_allowed: '%s' -> GLOBAL => ALLOWED\n",
+    ah_debug_log("is_action_allowed: '%s' -> GLOBAL => ALLOWED\n",
                  act.tool_name.c_str());
     return true;
   }
@@ -91,7 +102,7 @@ static bool is_action_allowed(const hook_action_t &act,
   else if (act.filter_mode == AH_FILTER_EXCLUDE)
     allowed = !found;
 
-  AH_DEBUG_LOG("is_action_allowed: '%s' evaluating caller '%s' against %s "
+  ah_debug_log("is_action_allowed: '%s' evaluating caller '%s' against %s "
                "filter => %s\n",
                act.tool_name.c_str(), caller.c_str(),
                (act.filter_mode == AH_FILTER_INCLUDE ? "INCLUDE" : "EXCLUDE"),
@@ -348,24 +359,6 @@ void *ah_get_next_hop(void **orig_out, void *return_addr) {
   bool is_stepping_down = (!tls_active_orig_ptrs.empty() &&
                            tls_active_orig_ptrs.back() == orig_out);
 
-  std::string caller_lib;
-
-  if (!is_stepping_down) {
-    Dl_info info;
-    if (dladdr(return_addr, &info) && info.dli_fname) {
-      caller_lib = info.dli_fname;
-    } else {
-      caller_lib = program_invocation_short_name;
-    }
-    tls_chain_callers[orig_out] = caller_lib;
-  } else {
-    caller_lib = tls_chain_callers[orig_out];
-  }
-
-  AH_DEBUG_LOG(
-      "ah_get_next_hop: orig_out=%p, caller='%s', is_stepping_down=%s\n",
-      orig_out, caller_lib.c_str(), is_stepping_down ? "true" : "false");
-
   std::shared_lock lock(*get_hooks_mutex());
   for (const auto &pair : *get_hooks()) {
     const auto &chain = pair.second;
@@ -374,21 +367,40 @@ void *ah_get_next_hop(void **orig_out, void *return_addr) {
 
     for (int i = chain.actions.size() - 1; i >= 0; --i) {
       if (chain.actions[i].original_out_ptr == orig_out) {
+
+        // State caching fixed: bind the resolved caller to the symbol_name!
+        std::string caller_lib;
+        if (!is_stepping_down) {
+          Dl_info info;
+          if (dladdr(return_addr, &info) && info.dli_fname) {
+            caller_lib = info.dli_fname;
+          } else {
+            caller_lib = program_invocation_short_name;
+          }
+          tls_chain_callers[chain.symbol_name] = caller_lib;
+        } else {
+          caller_lib = tls_chain_callers[chain.symbol_name];
+        }
+
+        ah_debug_log(
+            "ah_get_next_hop: orig_out=%p, caller='%s', is_stepping_down=%s\n",
+            orig_out, caller_lib.c_str(), is_stepping_down ? "true" : "false");
+
         int start_idx = is_stepping_down ? i - 1 : i;
 
-        AH_DEBUG_LOG("ah_get_next_hop: Found tool '%s' matched to orig_out. "
+        ah_debug_log("ah_get_next_hop: Found tool '%s' matched to orig_out. "
                      "Evaluating from chain index %d down.\n",
                      chain.actions[i].tool_name.c_str(), start_idx);
 
         for (int j = start_idx; j >= 0; --j) {
           if (is_action_allowed(chain.actions[j], caller_lib)) {
-            AH_DEBUG_LOG("ah_get_next_hop: Routing to tool '%s' trampoline\n",
+            ah_debug_log("ah_get_next_hop: Routing to tool '%s' trampoline\n",
                          chain.actions[j].tool_name.c_str());
             return chain.actions[j].trampoline_ptr;
           }
         }
 
-        AH_DEBUG_LOG("ah_get_next_hop: Filters exhausted. Routing to native OS "
+        ah_debug_log("ah_get_next_hop: Filters exhausted. Routing to native OS "
                      "pointer (%p)\n",
                      chain.native_os_ptr);
         return chain.native_os_ptr;
@@ -396,7 +408,8 @@ void *ah_get_next_hop(void **orig_out, void *return_addr) {
     }
   }
 
-  AH_DEBUG_LOG("ah_get_next_hop: orig_out not found in chain! Returning NULL\n");
+  ah_debug_log(
+      "ah_get_next_hop: orig_out not found in chain! Returning NULL\n");
   return nullptr;
 }
 
@@ -460,7 +473,7 @@ unsigned int la_version(unsigned int version) {
 void la_preinit(uintptr_t *cookie) {
   if (getenv("AH_DEBUG")) {
     ah_debug_enabled = true;
-    AH_DEBUG_LOG("Diagnostics Enabled.\n");
+    ah_debug_log("Diagnostics Enabled.\n");
   }
 
   const char *plugins_env = getenv("AH_PLUGINS");
@@ -543,7 +556,7 @@ static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
     }
 
     if (chain.is_dynamic_dispatch) {
-      AH_DEBUG_LOG("process_symbind: Binding '%s' to Dynamic Dispatcher\n",
+      ah_debug_log("process_symbind: Binding '%s' to Dynamic Dispatcher\n",
                    symname);
       *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
       return reinterpret_cast<uintptr_t>(chain.actions.back().dispatcher_ptr);
@@ -563,8 +576,9 @@ static uintptr_t process_symbind(const char *symname, uintptr_t original_addr,
         if (chain.actions.front().original_out_ptr) {
           *(chain.actions.front().original_out_ptr) = chain.native_os_ptr;
         }
-        AH_DEBUG_LOG("process_symbind: Binding '%s' to Static Trampoline '%s'\n",
-                     symname, chain.actions[i].tool_name.c_str());
+        ah_debug_log(
+            "process_symbind: Binding '%s' to Static Trampoline '%s'\n",
+            symname, chain.actions[i].tool_name.c_str());
         *flags = LA_SYMB_NOPLTENTER | LA_SYMB_NOPLTEXIT;
         return reinterpret_cast<uintptr_t>(chain.actions[i].trampoline_ptr);
       }

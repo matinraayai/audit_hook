@@ -27,7 +27,7 @@ struct HookGenerator;
 template <typename Ret, typename... Args, auto HookFunc, auto OriginalPtr>
 struct HookGenerator<Ret (*)(Args...), HookFunc, OriginalPtr> {
   static Ret Dispatcher(Args... args) {
-    // __builtin_return_address(0) guarantees we capture the exact immediate 
+    // __builtin_return_address(0) guarantees we capture the exact immediate
     // caller of the Dispatcher, effortlessly bypassing ld.so lazy bindings.
     void *next = ah_get_next_hop(reinterpret_cast<void **>(OriginalPtr),
                                  __builtin_return_address(0));
