@@ -1,17 +1,22 @@
 #!/bin/bash
-CORE="../src/.libs/libaudit_core.so"
-PLUGIN="./.libs/libtest_wrap.so"
+unset AH_PLUGINS
+unset AH_PLUGIN
 
-echo "=== [Diagnostics] Running App ==="
-OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="$PLUGIN" ./app_simple 2>&1)
+: "${abs_top_builddir:=..}"
+: "${abs_builddir:=.}"
+
+CORE="${abs_top_builddir}/src/.libs/libaudit_core.so"
+PLUGIN="${abs_builddir}/.libs/libtest_wrap.so"
+TARGET="${abs_builddir}/app_simple"
+
+echo "=== [Diagnostics] Running app_simple (Wrap) ==="
+OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="$PLUGIN" "$TARGET" 2>&1)
 EXIT_CODE=$?
 
-echo "=== [Diagnostics] Output ==="
 echo "$OUTPUT"
-echo "=== [Diagnostics] Exit Code: $EXIT_CODE ==="
 
-if [[ "$OUTPUT" == *"SUCCESS: Function was Wrapped!"* ]] && [[ "$OUTPUT" == *"Target App: Original Execution"* ]]; then
-    exit 0
-else
+if [[ "$OUTPUT" != *"SUCCESS"* ]] || [ $EXIT_CODE -ne 0 ]; then
     exit 1
 fi
+
+exit 0

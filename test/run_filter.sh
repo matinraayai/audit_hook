@@ -1,14 +1,28 @@
-#!/bin/sh
-
-# 1. Unset any inherited plugin variables to prevent leakage from other tests
+#!/bin/bash
 unset AH_PLUGINS
 unset AH_PLUGIN
 
-# 2. Explicitly define ONLY the plugin needed for this test
-export AH_PLUGINS="./test_filter_plugin.so"
+: "${abs_top_builddir:=..}"
+: "${abs_builddir:=.}"
 
-# 3. Set the audit core library
-export LD_AUDIT="libaudit_core.so"
+CORE="${abs_top_builddir}/src/.libs/libaudit_core.so"
+PLUGIN="${abs_builddir}/.libs/libtest_filter_plugin.so"
+TARGET="${abs_builddir}/app_filter"
 
-# 4. Run the target application and pass along any script arguments
-exec ./app_filter "$@"
+echo "=== [Diagnostics] Running app_filter ==="
+OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="$PLUGIN" "$TARGET" "$@" 2>&1)
+EXIT_CODE=$?
+
+echo "$OUTPUT"
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "ERROR: Test failed with exit code $EXIT_CODE"
+    exit $EXIT_CODE
+fi
+
+if [[ "$OUTPUT" == *"[AuditCore] WARNING: Diverging Chain Detected"* ]]; then
+    echo "ERROR: Unexpected Dynamic Dispatch warning found. Filter test should use static chaining."
+    exit 1
+fi
+
+exit 0

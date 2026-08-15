@@ -1,10 +1,17 @@
 #!/bin/bash
-CORE="../src/.libs/libaudit_core.so"
-PLUGIN_A="./.libs/libplugin_div_a.so"
-PLUGIN_B="./.libs/libplugin_div_b.so"
+unset AH_PLUGINS
+unset AH_PLUGIN
+
+: "${abs_top_builddir:=..}"
+: "${abs_builddir:=.}"
+
+CORE="${abs_top_builddir}/src/.libs/libaudit_core.so"
+PLUGIN_A="${abs_builddir}/.libs/libplugin_div_a.so"
+PLUGIN_B="${abs_builddir}/.libs/libplugin_div_b.so"
+TARGET="${abs_builddir}/app_test_divergent"
 
 echo "=== [Diagnostics] Running app_test_divergent ==="
-OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="$PLUGIN_A:$PLUGIN_B" ./app_test_divergent 2>&1)
+OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="${PLUGIN_A}:${PLUGIN_B}" "$TARGET" 2>&1)
 EXIT_CODE=$?
 
 echo "$OUTPUT"

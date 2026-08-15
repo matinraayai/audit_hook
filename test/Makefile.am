@@ -10,7 +10,8 @@ AM_CPPFLAGS = -I$(top_srcdir)/include
 PLUGIN_LIBS = -module -shared -avoid-version -rpath $(abs_builddir) $(top_builddir)/src/libaudit_core.la
 COMMON_LIB_FLAGS = -shared -avoid-version -rpath $(abs_builddir)
 
-lib_LTLIBRARIES = \
+# Changed from lib_LTLIBRARIES to check_LTLIBRARIES to prevent installing test artifacts
+check_LTLIBRARIES = \
     libnum.la \
     libnum2.la \
     libnum3.la \
@@ -174,6 +175,12 @@ app_hammer_LDFLAGS = -ldl
 # ------------------------------------------------------------------------------
 # Test Scripts & Distribution
 # ------------------------------------------------------------------------------
+
+# Pass absolute build paths to the test environment
+AM_TESTS_ENVIRONMENT = \
+    export abs_top_builddir='$(abs_top_builddir)'; \
+    export abs_builddir='$(abs_builddir)';
+
 TESTS = \
     run_replace.sh \
     run_wrap.sh \

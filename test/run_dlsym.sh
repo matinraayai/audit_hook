@@ -1,9 +1,16 @@
 #!/bin/bash
-CORE="../src/.libs/libaudit_core.so"
-PLUGIN="./.libs/libtest_dlsym_plugin.so"
+unset AH_PLUGINS
+unset AH_PLUGIN
+
+: "${abs_top_builddir:=..}"
+: "${abs_builddir:=.}"
+
+CORE="${abs_top_builddir}/src/.libs/libaudit_core.so"
+PLUGIN="${abs_builddir}/.libs/libtest_dlsym_plugin.so"
+TARGET="${abs_builddir}/app_dlsym"
 
 echo "=== [Diagnostics] Running App ==="
-OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="$PLUGIN" ./app_dlsym 2>&1)
+OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="$PLUGIN" "$TARGET" 2>&1)
 EXIT_CODE=$?
 
 echo "=== [Diagnostics] Output ==="

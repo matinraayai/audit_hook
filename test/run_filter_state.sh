@@ -1,9 +1,16 @@
 #!/bin/bash
-CORE="../src/.libs/libaudit_core.so"
-PLUGIN="./.libs/libtest_filter_state_plugin.so"
+unset AH_PLUGINS
+unset AH_PLUGIN
+
+: "${abs_top_builddir:=..}"
+: "${abs_builddir:=.}"
+
+CORE="${abs_top_builddir}/src/.libs/libaudit_core.so"
+PLUGIN="${abs_builddir}/.libs/libtest_filter_state_plugin.so"
+TARGET="${abs_builddir}/app_filter_state"
 
 echo "=== [Diagnostics] Running app_filter_state ==="
-OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="$PLUGIN" ./app_filter_state 2>&1)
+OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="$PLUGIN" "$TARGET" 2>&1)
 EXIT_CODE=$?
 
 echo "$OUTPUT"
