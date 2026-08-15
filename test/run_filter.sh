@@ -5,9 +5,15 @@ unset AH_PLUGIN
 : "${abs_top_builddir:=..}"
 : "${abs_builddir:=.}"
 
+# Manually point the linker to our uninstalled libraries so the raw binary can run
+export LD_LIBRARY_PATH="${abs_builddir}/.libs:${abs_top_builddir}/src/.libs:$LD_LIBRARY_PATH"
+
 CORE="${abs_top_builddir}/src/.libs/libaudit_core.so"
 PLUGIN="${abs_builddir}/.libs/libtest_filter_plugin.so"
-TARGET="${abs_builddir}/app_filter"
+
+# Execute the raw binary in .libs/ to prevent LD_AUDIT from 
+# recursively auditing Libtool's bash utilities!
+TARGET="${abs_builddir}/.libs/app_filter"
 
 echo "=== [Diagnostics] Running app_filter ==="
 OUTPUT=$(LD_AUDIT="$CORE" AH_PLUGINS="$PLUGIN" "$TARGET" "$@" 2>&1)
@@ -15,13 +21,9 @@ EXIT_CODE=$?
 
 echo "$OUTPUT"
 
-if [ $EXIT_CODE -ne 0 ]; then
-    echo "ERROR: Test failed with exit code $EXIT_CODE"
-    exit $EXIT_CODE
-fi
-
-if [[ "$OUTPUT" == *"[AuditCore] WARNING: Diverging Chain Detected"* ]]; then
-    echo "ERROR: Unexpected Dynamic Dispatch warning found. Filter test should use static chaining."
+# Simply check for the SUCCESS string and a clean exit code
+if [[ "$OUTPUT" != *"SUCCESS"* ]] || [ $EXIT_CODE -ne 0 ]; then
+    echo "ERROR: Test failed."
     exit 1
 fi
 

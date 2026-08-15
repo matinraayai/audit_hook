@@ -148,7 +148,7 @@ app_dlopen_LDFLAGS = -ldl
 # FIXED: libnum.la removed from LDADD; it must be dlopen'd dynamically!
 
 app_filter_SOURCES = app_filter.c
-app_filter_LDADD = libnum.la libnum2.la libnum3.la
+app_filter_LDADD = libnum3.la
 
 app_comp_SOURCES = app_comp.c
 app_comp_LDADD = libcomp.la
