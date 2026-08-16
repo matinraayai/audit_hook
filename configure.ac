@@ -10,12 +10,6 @@ AC_PROG_CC
 # Require C++20
 CXXFLAGS="$CXXFLAGS -std=c++20"
 
-AC_CONFIG_FILES([
-    Makefile
-    src/Makefile
-    test/Makefile
-])
-
 # Check for Doxygen
 AC_CHECK_PROGS([DOXYGEN], [doxygen])
 if test -z "$DOXYGEN"; then
