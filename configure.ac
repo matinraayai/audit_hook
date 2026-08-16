@@ -15,5 +15,23 @@ AC_CONFIG_FILES([
     src/Makefile
     test/Makefile
 ])
+
+# Check for Doxygen
+AC_CHECK_PROGS([DOXYGEN], [doxygen])
+if test -z "$DOXYGEN"; then
+    AC_MSG_WARN([Doxygen not found - continuing without Doxygen support])
+fi
+
+# Create an Automake conditional so Makefiles know if Doxygen is available
+AM_CONDITIONAL([HAVE_DOXYGEN], [test -n "$DOXYGEN"])
+
+# Tell Autoconf to process Doxyfile.in -> Doxyfile
+AC_CONFIG_FILES([
+    Makefile
+    src/Makefile
+    test/Makefile
+    Doxyfile
+])
+
 AC_OUTPUT
 

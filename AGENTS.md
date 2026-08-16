@@ -3,82 +3,66 @@
 ## Build & Test
 
 ```bash
-autoreconf -i && ./configure && make && make check
+autoreconf -i && ./configure && make && make check   # from repo root only
 ```
 
-`make check` runs 12 integration tests (shell scripts in `test/`). Diagnostics go to `test/test-suite.log`.
+`make check` runs 12 test scripts under `test/TESTS`. Diagnostics go to `test/test-suite.log`. Tests use `abs_top_builddir` / `LD_LIBRARY_PATH` env vars injected via `AM_TESTS_ENVIRONMENT` in `test/Makefile.am` — never run tests manually from a subdirectory.
 
 ## Architecture
 
-- **`src/audit_core.cpp`** — LD_AUDIT backend engine (C++20). Hooks stored in a magic-static `unordered_map`; caller identity tracked via `la_objopen`/`la_objclose` cookie→pathname map. Captures real `dlsym` during `la_symbind64/32`.
-- **`include/audit_hook.hpp`** — public C++20 API header (shipped via `make install`). Provides `ah_register_hook`, `ah_set_caller_filter`, thread pause/resume/ignore functions, and the `audit_hooks::register_wrap` / `register_replace` templates.
-- **`test/test_*.cpp`** — 7 plugin wrappers exercising each API variant (see table below).
+Two-level autotools tree: `SUBDIRS = src test`.
 
-Test plugins are one-to-one with test scripts:
+- **Root Makefile.am** — delegates to SUBDIRS, installs `include/audit_hook.hpp` and `include/audit_hook_dynamic.h` via `include_HEADERS`.
+- **`src/Makefile.am`** — builds two libtool libraries:
+  - `libaudit_core.la` — LD_AUDIT engine (C++20: concepts, ranges, constexpr, thread-local state). Hooks stored in a mutex-guarded `unordered_map`; caller identity tracked via `la_objopen`/`la_objclose` cookie-to-pathname mapping.
+  - `libaudit_hook_dynamic.la` — namespace bridge stub allowing target apps (in the main executable's address space) to call into the isolated LD_AUDIT engine via `La_symbind64` interception.
+- **`test/Makefile.am`** — 23 shared-lib plugins (via `check_LTLIBRARIES`), 10 test executables (`check_PROGRAMS`), 12 shell-test scripts (`TESTS`). All `.libs/*.so` files are plain `.so` with no soname or ABI version suffix.
 
-| Script | Plugin | What it validates |
+## Build system constraints
+
+- **`CXXFLAGS += -std=c++20`** — non-trivial: if the compiler defaults to C++17, the build fails silently until linking (template errors cascade from concepts).
+- **Autoreconf required after editing any `.ac`, `.am`, or m4 file.** After autoreconf, re-run `configure` (it is not incremental).
+- **rpath set to `${abs_builddir}`** on every plugin so `LD_AUDIT=libaudit_core.so` finds it at runtime without installing.
+- **libtool `.libs/` artifacts**: built binaries sit in `test/.libs/`. Tests launch them directly (not the `test/` root) to avoid `LD_AUDIT` recursively auditing libtool's bash helpers.
+- **`AH_PLUGINS=` colon-delimited** — newer API. Old `$AH_PLUGIN` (singular) is deprecated by the C++ code.
+- **Static chaining vs dynamic dispatch**: When multiple plugins wrap the same symbol with matching or global filters, hooks chain statically at link-time. Conflicting caller filters trigger automatic dynamic dispatch via TLS + `dladdr`. This upgrade emits a stderr warning.
+
+## Adding a test (plugin)
+
+In `test/Makefile.am`, add to all three lists:
+1. `check_LTLIBRARIES` — plugin `.la` rule with `LDFLAGS = $(PLUGIN_LIBS)` (which pulls in `$(top_builddir)/src/libaudit_core.la`)
+2. `check_PROGRAMS` — target executable with its `_LDADD`
+3. `TESTS` — shell runner script, listed under the `EXTRA_DIST` section that is already defined
+
+The runner must:
+- Source `abs_top_builddir` and `abs_builddir` from env (or use the test-driver defaults)
+- Export `LD_LIBRARY_PATH="${abs_builddir}/.libs:${abs_top_builddir}/src/.libs"`
+- Launch `${abs_builddir}/.libs/<test_binary>` with `LD_AUDIT=<core.so> AH_PLUGINS=<plugin.so>` and pipe stderr through stdout
+- Assert output contains test markers (usually `SUCCESS`)
+
+## Hook & filter semantics (quick reference)
+
+### Composition (same symbol, multiple plugins)
+
+| Sequence | Behavior | Warning? |
 |---|---|---|
-| `run_replace.sh` | `test_replace.cpp` | `register_replace` (zero-overhead function swap) |
-| `run_wrap.sh` | `test_wrap.cpp` | `register_wrap` (intercept + call original) |
-| `run_dlsym.sh` | `test_dlsym_plugin.cpp` | dlsym lookup interception |
-| `run_dlopen.sh` | `test_dlopen_plugin.cpp` | late-bound dlopen hooks, RTLD_DEFAULT |
-| `run_filter.sh` | `test_filter_plugin.cpp` | caller-based include/exclude filtering (include-only) |
-| `run_comp.sh` | `test_comp_plugin.cpp` | hook composition: wrap→replace, replace→wrap, wrap→wrap, replace→replace chaining rules |
-| `run_filter_state.sh` | `test_filter_state_plugin.cpp` | filter state machine: include/exclude set-difference with ordering |
+| Wrap → Replace | Discard wrap; replace takes over | Yes |
+| Replace → Wrap | Chain: replaced func becomes wrapper "original" | No |
+| Wrap → Wrap | Chain outward → inward → native OS | No |
+| Replace → Replace | Overwrite; new replace wins | Yes |
 
-Non-C++ sources in `test/` (`app_*.c`, `lib*.c`) are shim binaries/libraries — do not treat them as library code.
-
-## Writing a plugin
-
-Plugins must link against `src/libaudit_core.la`. From `test/Makefile.am`:
-
-```
-PLUGIN_LIBS = -module -shared -avoid-version -rpath $(abs_builddir) $(top_builddir)/src/libaudit_core.la
-```
-
-Need `-fPIC` and `-I$(top_srcdir)/include`. See `test/Makefile.am` for a working template.
-
-## Running with plugins
-
-```bash
-AH_PLUGINS=./plugin1.so:./plugin2.so LD_AUDIT=libaudit_core.so ./target_app
-```
-
-Plugins are colon-delimited, loaded sequentially in `la_preinit` via `dlopen(RTLD_NOW | RTLD_LOCAL)`. The older single `AH_PLUGIN` env var is replaced — use `AH_PLUGINS`.
-
-## Hook composition semantics
-
-When multiple plugins register hooks for the same symbol (loaded in sequence), they resolve deterministically:
-
-| Sequence | Action | Warning? |
-|---|---|---|
-| Wrap → Replace | Discard wrap; new replace takes over | Yes, to stderr |
-| Replace → Wrap | Chain: replaced function becomes the "original" of the wrapper | No |
-| Wrap → Wrap | Chain: outermost calls inner which calls native OS function | No |
-| Replace → Replace | Overwrite old replace; new replace takes over | Yes, to stderr |
-
-## Filter state machine
-
-`ah_set_caller_filter` maintains persistent include/exclude lists per hook across subsequent calls. New registrations are treated as set operations on the current state:
+### Filters (per-hook, `ah_set_caller_filter`)
 
 | Current state | Directive | Result | Duplicates? |
 |---|---|---|---|
-| Global | Include | Replace with include list | — |
-| Include | Include (union) | Append new libs to include list | Silently ignored |
-| Global | Exclude | All except listed libs | — |
-| Exclude | Exclude (union) | Append new libs to exclude list | Silently ignored |
-| Include | Exclude (set diff) | Remove listed libs from include list | Warn if not in current include list |
-| Exclude | Include (inverted set diff) | Remove listed libs from exclude list (re-permit them) | Warn if not in current exclude list |
-
-## Key constraints
-
-- **C++20 required** (`configure.ac:11`). Features used: concepts, ranges, `constexpr`, templates, thread-local storage.
-- **No libtool versioning** — all shared libs use `-avoid-version`; they produce plain `.so` with no soname suffixes.
-- **rpath matters** — test plugins and libraries set `-rpath $(abs_builddir)` so `LD_AUDIT=libaudit_core.so` finds them at runtime without installing.
-- **`make check` only from the root directory** — shell scripts use relative paths that depend on the top-level build layout.
-- **Autoreconf regenerator** — after editing `configure.ac`, `Makefile.am`, or m4 macros, run `autoreconf -i` before `./configure`.
+| Global → Include | Full replacement of global | — |
+| Include+Include | Union to existing list | Silently ignored |
+| Global → Exclude | All except listed libs | — |
+| Exclude+Exclude | Union to exclusion list | Silently ignored |
+| Include−Exclude | Set-difference (remove listed) | Warn if not present |
+| Exclude∪Include | Inverted set-diff (re-permit) | Warn if not present |
 
 ## Developer notes
 
-- The filter test (`run_filter.sh`) now validates both include-only and set-difference cases (TODO resolved).
-- If adding a new plugin test: update `check_PROGRAMS`, `check_LTLIBRARIES`, and `TESTS` in `test/Makefile.am`; the test script should check both app output AND stderr for expected `[AuditCore] WARNING:` or `[AuditCore] FATAL:` messages.
+- clang-format config is in `.clang-format` — run `clang-format -i <file>` before committing.
+- CI/lint setup: none detected in the repo. No Makefile target for formatting, only build & test.

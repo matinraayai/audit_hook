@@ -1,0 +1,19 @@
+# Project settings
+PROJECT_NAME           = "@PACKAGE_NAME@"
+PROJECT_NUMBER         = "@PACKAGE_VERSION@"
+OUTPUT_DIRECTORY       = docs
+
+# Input settings
+# Tell Doxygen to only parse the public C/C++ headers
+INPUT                  = @top_srcdir@/include
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h *.hpp
+
+# Formatting and features
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+OPTIMIZE_OUTPUT_FOR_C  = NO
+MACRO_EXPANSION        = YES
+
+# Ensure Doxygen extracts all documentation, even for undocumented items
+EXTRACT_ALL            = YES
