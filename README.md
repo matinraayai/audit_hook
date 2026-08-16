@@ -36,34 +36,13 @@ Tools like LLNL's GOTCHA attempted to bridge this gap by providing a simpler API
 * **Zero Application Changes:** It functions completely transparently. It does not require any application source code modifications, recompilation, or changes to build scripts.
 * **Advanced Capabilities:** It introduces powerful new capabilities impossible in standard `LD_PRELOAD`, such as targeted caller filtering and deterministic multi-tool composition.
 
-Here is an expanded section for your `README.md` that highlights the modern C++ type safety features. You can add this directly under the **Motivation & Background** section or as a dedicated subsection under **Features**.
+
 
 ---
 
-### Uncompromising Type Safety via Modern C++20
-
-Traditional dynamic interception tools rely heavily on raw `void*` casting, unsafe macros, and `dlsym` type-punning. This bypasses the compiler's type checking entirely, meaning signature mismatches between the original function and the wrapper are not caught until they cause a segmentation fault at runtime.
-
-`audit_hook` completely eliminates this class of errors by heavily leveraging C++20 features to guarantee absolute type safety at compile time:
-
-* **Non-Type Template Parameters (NTTP):** The registration API uses `template <auto HookFunc, auto OriginalPtr>` to bind the hook and the original function pointer. This forces the C++ compiler to automatically deduce and verify both signatures during compilation. If your wrapper's arguments or return type do not perfectly match the target function, the code simply will not compile.
-
-
-* **Compile-Time Trampoline Generation:** Instead of relying on fragile assembly thunks, `libffi`, or macro expansions, the framework's internal `HookGenerator` uses variadic templates (`typename... Args`) and `decltype` to automatically generate type-perfect trampolines and dispatchers. The arguments are perfectly forwarded to the underlying functions.
-
-
-* **Compile-Time Branching (`if constexpr`):** Handling functions that return `void` versus those that return values is a notorious pain point in C-based interception tools. `audit_hook` elegantly handles this using `if constexpr (std::is_void_v<Ret>)`, generating the strictly correct return logic for each specific hook at compile time without any runtime overhead.
-
-
-* **C++20 Concepts and Ranges:** The dynamic configuration API uses C++20 Concepts (`std::ranges::forward_range` and `requires std::convertible_to`) to enforce that caller filter lists are valid, contiguous collections of C-strings (`const char*`). This guarantees that dynamically passing `std::vector` or `std::array` configurations to the framework's state machine is rigorously type-checked at the boundary.
-
-
-## Features
+## Core Features & Architecture
 
 * **Zero dlsym bootstrap overhead**: The linker hands us the original function pointer.
-
-
-* **C++20 Compile-time Trampolines**: Auto-manages thread-local state to prevent recursive loops.
 
 
 * **Native dlopen/dlsym support**: Automatically hooks dynamically loaded libraries.
@@ -72,6 +51,53 @@ Traditional dynamic interception tools rely heavily on raw `void*` casting, unsa
 * **Ordered Filtered Projections**: Plugin actions are completely isolated. Hooks are evaluated per-caller using zero-overhead static chaining or automatic dynamic dispatch.
 
 
+
+### Uncompromising Type Safety via Modern C++20
+
+Traditional dynamic interception tools rely heavily on raw `void*` casting, unsafe macros, and `dlsym` type-punning. `audit_hook` completely eliminates this class of errors by leveraging C++20 features to guarantee absolute type safety at compile time:
+
+* **Non-Type Template Parameters (NTTP):** The registration API uses `template <auto HookFunc, auto OriginalPtr>` to bind the hook and the original function pointer. This forces the compiler to automatically deduce and verify both signatures during compilation.
+
+
+* **Compile-Time Trampoline Generation:** The framework's internal `HookGenerator` uses variadic templates (`typename... Args`) to automatically generate type-perfect trampolines and dispatchers.
+
+
+* **Compile-Time Branching (`if constexpr`):** `audit_hook` elegantly handles functions returning `void` versus value types using `if constexpr (std::is_void_v<Ret>)`, generating strictly correct return logic for each specific hook at compile time without any runtime overhead.
+
+
+* **C++20 Concepts and Ranges:** The dynamic configuration API uses C++20 Concepts (`std::ranges::forward_range` and `requires std::convertible_to`) to enforce that caller filter lists are valid, contiguous collections of C-strings (`const char*`).
+
+
+
+### Concurrency & Thread Safety
+
+Writing thread-safe dynamic hooks is notoriously difficult. `audit_hook` handles this concurrency elegantly under the hood:
+
+* **Reentrancy & Recursion Protection:** The framework uses `thread_local` variables (such as `tls_hooks_paused` and `tls_active_orig_ptrs`) to automatically manage execution state. This securely prevents infinite recursion if a wrapper inadvertently calls a hooked function.
+
+
+* **Safe Dynamic Updates:** The dynamic dispatcher utilizes `std::shared_mutex` reader-writer locks to ensure that plugin routing tables can be updated on the fly.
+
+
+
+### Transparent Performance Profile
+
+While dynamic dispatch is available for complex caller-filtering, the framework prioritizes maximum performance for standard hooks.
+
+* **Zero-Overhead Static Chaining:** When multiple plugins wrap the same function and their filters agree globally, the dynamic linker resolves the stack of trampolines once at link-time. The framework writes the dynamically resolved pointers directly into the C++ trampoline's `original_out` pointer. This runtime execution path bypasses the dynamic linker and the internal `audit_core` hash maps entirely.
+
+
+
+---
+
+## Candid Limitations
+
+While `audit_hook` provides a robust, modern alternative to `LD_PRELOAD` and GOTCHA, it is important to understand the inherent limitations of the underlying `LD_AUDIT` interface:
+
+* **Security Restrictions:** Just like `LD_PRELOAD`, the `LD_AUDIT` environment variable is strictly ignored by the operating system when executing `setuid` or `setgid` binaries.
+* **PLT Boundary Requirements:** `LD_AUDIT` works by intercepting symbol bindings across the Procedure Linkage Table (PLT). It cannot intercept internal function calls made within the same translation unit (where the compiler bypasses the PLT), nor can it hook functions that the compiler has directly inlined.
+
+---
 
 ## Build Instructions
 
@@ -83,6 +109,8 @@ make check
 
 ```
 
+---
+
 ## Usage
 
 Link your plugin against `libaudit_core.so` and use `audit_hooks::register_wrap`. Run your target application with:
@@ -93,6 +121,8 @@ AH_PLUGINS=./my_plugin.so LD_AUDIT=libaudit_core.so ./target_app
 ```
 
 *(Or compile your app with `-Wl,--audit=libaudit_core.so` to avoid setting LD_AUDIT)*
+
+---
 
 ## Hook Composition Semantics
 
@@ -110,6 +140,8 @@ When multiple plugins (loaded sequentially via `AH_PLUGINS`) or multiple directi
 * **Replace followed by Replace:** The older replacement is completely overwritten by the newer replacement. A warning is emitted to `stderr` to notify the user of the override.
 
 
+
+---
 
 ## Caller Filter Semantics
 
@@ -137,6 +169,8 @@ Caller filters (`ah_set_caller_filter`) allow tools to limit hooks based on the 
 
 
 
+---
+
 ## Multi-Plugin Isolation & Dynamic Dispatch
 
 The framework uses an **Ordered Filtered Projection** model to guarantee that filters applied by one plugin do not corrupt or bypass the chains of another plugin.
@@ -159,11 +193,11 @@ The framework uses an **Ordered Filtered Projection** model to guarantee that fi
 
 
 
-### First-Class Dynamic Dispatch & Runtime Toggling
+### Crossing the Linker Namespace Boundary & Runtime Toggling
 
 In addition to automatic fallback, tools can explicitly force a hook into dynamic routing using `audit_hooks::register_dynamic`. This is incredibly powerful for applications that need to toggle hooks on or off mid-execution.
 
-Because `LD_AUDIT` operates in a completely isolated linker namespace (`LM_ID_NEWLM`), the main application cannot directly call the auditor's memory. To solve this, `audit_hook` ships with a safe namespace bridge:
+Because `LD_AUDIT` operates in a completely isolated linker namespace (`LM_ID_NEWLM`), the main application cannot directly call the auditor's memory. To solve this isolation problem, `audit_hook` ships with a safe namespace bridge:
 
 1. Target applications `#include <audit_hook_dynamic.hpp>` and link against the provided `libaudit_hook_dynamic.so` stub.
 
