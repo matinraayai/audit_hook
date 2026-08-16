@@ -19,11 +19,17 @@ fi
 # Create an Automake conditional so Makefiles know if Doxygen is available
 AM_CONDITIONAL([HAVE_DOXYGEN], [test -n "$DOXYGEN"])
 
+# Check for jemalloc to determine if we can build the jemalloc_injector example
+AC_CHECK_LIB([jemalloc], [je_malloc], [HAVE_JEMALLOC=yes], [HAVE_JEMALLOC=no])
+AM_CONDITIONAL([BUILD_JEMALLOC_EXAMPLE], [test "$HAVE_JEMALLOC" = "yes"])
+
 # Tell Autoconf to process Doxyfile.in -> Doxyfile
 AC_CONFIG_FILES([
     Makefile
     src/Makefile
     test/Makefile
+    examples/Makefile
+    examples/jemalloc_injector/Makefile
     Doxyfile
 ])
 

@@ -2,6 +2,8 @@
 
 A high-performance, type-safe API for wrapping and replacing C/C++ functions dynamically. It provides the developer ergonomics of `LD_PRELOAD` and GOTCHA, but is backed natively by Linux's `LD_AUDIT` linker interface. `audit_hook` delivers the simplicity of traditional interception techniques without the fragility, ABI restrictions, or architecture-specific hacks that plague older methods.
 
+---
+
 ## Motivation & Background
 
 Dynamic function interception is a critical capability for performance profiling, debugging, and security tools. However, traditional approaches suffer from significant limitations:
@@ -21,12 +23,12 @@ While `LD_PRELOAD` is simple to use and widely understood, it is notoriously fra
 
 `LD_AUDIT` provides a vastly superior, safer tooling interface provided directly by the dynamic linker. However, its raw API is notoriously difficult to implement correctly. Developers want the simplicity of `LD_PRELOAD` without the complexity of `LD_AUDIT`.
 
-Tools like LLNL's GOTCHA attempted to bridge this gap by providing a simpler API, but they introduced their own severe drawbacks:
+Tools like LLNL's GOTCHA attempted to bridge this gap by providing a simpler API. **Because GOTCHA operates directly on the Global Offset Table (GOT), its intercepts become direct memory jumps, imposing virtually zero per-call overhead.** However, this raw speed comes at the cost of severe architectural drawbacks:
 
-* **Hacky Memory Manipulation:** Because GOTCHA operates directly on the Global Offset Table (GOT), it relies on highly invasive techniques. It modifies the memory protection status of the pages containing the GOT table and literally rewrites the GOT entries in memory.
+* **Hacky Memory Manipulation:** To rewrite the GOT, GOTCHA relies on highly invasive techniques. It must change the memory protection status of the pages containing the GOT table and literally rewrite the GOT entries in active memory.
 * **Poor Portability:** Manually manipulating the GOT makes GOTCHA extremely difficult to port across different CPU architectures.
 * **Application Modifications:** GOTCHA operates inside the application itself, meaning target applications often require modifications or build-script changes just to use the tool.
-* **ABI Constraints:** Like `LD_PRELOAD`, GOTCHA still suffers from ABI compatibility issues.
+* **ABI Constraints:** Like `LD_PRELOAD`, GOTCHA still suffers from strict ABI compatibility issues.
 
 ### The `audit_hook` Solution
 
@@ -80,11 +82,14 @@ Writing thread-safe dynamic hooks is notoriously difficult. `audit_hook` handles
 
 
 
-### Transparent Performance Profile
+### Performance Considerations: Static vs. Dynamic Routing
 
-While dynamic dispatch is available for complex caller-filtering, the framework prioritizes maximum performance for standard hooks.
+The `audit_hook` framework is designed to prioritize performance by default, but it explicitly trades raw speed for safety and isolation when complex filtering is required.
 
-* **Zero-Overhead Static Chaining:** When multiple plugins wrap the same function and their filters agree globally, the dynamic linker resolves the stack of trampolines once at link-time. The framework writes the dynamically resolved pointers directly into the C++ trampoline's `original_out` pointer. This runtime execution path bypasses the dynamic linker and the internal `audit_core` hash maps entirely.
+* **Zero-Overhead Static Chaining:** By default, when multiple plugins wrap the same function and their filters agree globally, the dynamic linker resolves the stack of trampolines once at link-time. The framework writes the dynamically resolved pointers directly into the C++ trampoline's `original_out` pointer. This runtime execution path bypasses the dynamic linker and the internal `audit_core` hash maps entirely, resulting in performance identical to a raw, unhooked C function call. This matches the direct-jump performance of GOTCHA without rewriting memory.
+
+
+* **The Overhead of Dynamic Routing:** If multiple plugins apply conflicting caller filters to the same function, or if a tool explicitly requests runtime toggling via `register_dynamic`, the framework must upgrade the hook to use Dynamic Dispatch. **Dynamic routing imposes a distinct per-call performance penalty.** The dispatcher must push the caller's address to a Thread-Local Storage (TLS) stack, invoke `dladdr` to dynamically identify the originating library, and evaluate the active filtering ruleset on the fly. This overhead is the necessary architectural cost to safely and transparently route conflicting hooks without invasively altering memory protections.
 
 
 
@@ -120,7 +125,7 @@ AH_PLUGINS=./my_plugin.so LD_AUDIT=libaudit_core.so ./target_app
 
 ```
 
-*(Or compile your app with `-Wl,--audit=libaudit_core.so` to avoid setting LD_AUDIT)*
+(Or compile your app with `-Wl,--audit=libaudit_core.so` to avoid setting LD_AUDIT)
 
 ---
 
